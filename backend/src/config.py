@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     langsmith_project: str = "youtube-extention"
     langsmith_tracing: str = "false"
 
+    version: str = "0.1.0"
     log_level: str = "INFO"
     allowed_origins: list[str] = ["http://localhost:3000"]
 

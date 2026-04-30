@@ -39,7 +39,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        s: Settings = app.state.settings
+        return {
+            "status": "ok",
+            "version": s.version,
+            "langsmith_enabled": s.langsmith_tracing.lower() == "true",
+            "has_api_key": bool(s.openai_api_key),
+        }
 
     return app
 

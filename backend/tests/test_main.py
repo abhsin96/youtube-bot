@@ -18,7 +18,11 @@ def client():
 def test_health_returns_200(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["version"] == "0.1.0"
+    assert body["has_api_key"] is True
+    assert isinstance(body["langsmith_enabled"], bool)
 
 
 def test_cors_preflight_chrome_extension(client):
