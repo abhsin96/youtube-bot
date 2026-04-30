@@ -225,18 +225,92 @@ def store_node(state: IngestState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Router
+# Routers
 # ---------------------------------------------------------------------------
 
 
-def route_on_status(state: IngestState) -> str:
-    """Used as a conditional edge after every node.
+def route_idempotency(state: IngestState) -> str:
+    """Conditional edge after idempotency_check_node.
 
-    Returns the name of the next node, or END on terminal status.
+    skipped → END  (collection already exists; caller reads status="skipped")
+    error   → END  (storage unavailable)
+    running → "fetch_transcript_node"
     """
-    status = state["status"]
-    if status in ("error", "skipped", "done"):
-        from langgraph.graph import END  # local import avoids circular at module level
+    from langgraph.graph import END
 
+    if state["status"] in ("skipped", "error"):
         return END
-    return "_continue"
+    return "fetch_transcript_node"
+
+
+def route_on_error(state: IngestState) -> str:
+    """Conditional edge after fetch_transcript_node, chunk_node, embed_node.
+
+    error → END
+    *     → next node (caller supplies the target via the edge mapping)
+    """
+    from langgraph.graph import END
+
+    if state["status"] == "error":
+        return END
+    return "_ok"
+
+
+# ---------------------------------------------------------------------------
+# Graph
+# ---------------------------------------------------------------------------
+
+
+def build_graph():
+    """Compile and return the ingestion StateGraph.
+
+    Topology
+    ────────
+    idempotency_check_node
+        ├─ skipped/error → END
+        └─ running       → fetch_transcript_node
+                               ├─ error → END
+                               └─ ok    → chunk_node
+                                              ├─ error → END
+                                              └─ ok    → embed_node
+                                                             ├─ error → END
+                                                             └─ ok    → store_node → END
+    """
+    from langgraph.graph import END, StateGraph
+
+    g = StateGraph(IngestState)
+
+    g.add_node("idempotency_check_node", idempotency_check_node)
+    g.add_node("fetch_transcript_node", fetch_transcript_node)
+    g.add_node("chunk_node", chunk_node)
+    g.add_node("embed_node", embed_node)
+    g.add_node("store_node", store_node)
+
+    g.set_entry_point("idempotency_check_node")
+
+    # idempotency → skip to END or proceed to fetch
+    g.add_conditional_edges(
+        "idempotency_check_node",
+        route_idempotency,
+        {"fetch_transcript_node": "fetch_transcript_node", END: END},
+    )
+
+    # each subsequent node short-circuits to END on error, else advances
+    g.add_conditional_edges(
+        "fetch_transcript_node",
+        route_on_error,
+        {"_ok": "chunk_node", END: END},
+    )
+    g.add_conditional_edges(
+        "chunk_node",
+        route_on_error,
+        {"_ok": "embed_node", END: END},
+    )
+    g.add_conditional_edges(
+        "embed_node",
+        route_on_error,
+        {"_ok": "store_node", END: END},
+    )
+    g.add_edge("store_node", END)
+
+    return g.compile()
