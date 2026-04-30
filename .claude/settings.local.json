@@ -6,7 +6,9 @@
       "Bash(python3 -m venv backend/venv)",
       "Bash(backend/venv/bin/python --version)",
       "Bash(backend/venv/bin/pip install *)",
-      "Bash(make check *)"
+      "Bash(make check *)",
+      "Bash(make test *)",
+      "Bash(chmod +x *)"
     ]
   }
 }
