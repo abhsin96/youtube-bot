@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     version: str = "0.1.0"
     log_level: str = "INFO"
+    json_logs: bool = True
     allowed_origins: list[str] = ["http://localhost:3000"]
 
     @field_validator("openai_api_key")

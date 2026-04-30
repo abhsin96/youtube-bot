@@ -1,4 +1,5 @@
 fastapi
+structlog
 uvicorn
 langchain
 langchain-openai

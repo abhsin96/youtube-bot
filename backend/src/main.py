@@ -1,20 +1,21 @@
-import logging
 from contextlib import asynccontextmanager
 
+import structlog
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import Settings, load_settings
 from src.logging_config import configure_logging
+from src.middleware import RequestIDMiddleware
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
-    logger.info("server starting", extra={"project": settings.langsmith_project})
+    logger.info("server starting", project=settings.langsmith_project)
     yield
     logger.info("server stopped")
 
@@ -23,11 +24,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings()
 
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, json_logs=settings.json_logs)
 
     app = FastAPI(title="youtube-extention", lifespan=lifespan)
     app.state.settings = settings
 
+    # RequestIDMiddleware must be outermost so request_id is bound before CORS
+    app.add_middleware(RequestIDMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
