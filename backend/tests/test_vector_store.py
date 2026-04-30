@@ -5,6 +5,7 @@ from langchain_core.documents import Document
 
 from src.vector_store import (
     _collection_name,
+    _sanitize_video_id,
     add_documents,
     collection_exists,
     delete_collection,
@@ -46,23 +47,49 @@ def _docs(n: int = 3) -> list[Document]:
 # ---------------------------------------------------------------------------
 
 
-def test_collection_name_prefixed():
-    assert _collection_name("abc").startswith("vid-")
+def test_collection_name_format():
+    assert _collection_name("abc123") == "video_abc123"
+
+
+def test_collection_name_prefixed_with_video_underscore():
+    assert _collection_name("abc").startswith("video_")
 
 
 def test_collection_name_max_63_chars():
-    long_id = "x" * 100
-    assert len(_collection_name(long_id)) <= 63
-
-
-def test_collection_name_replaces_dots_and_slashes():
-    name = _collection_name("a.b/c")
-    assert "." not in name
-    assert "/" not in name
+    assert len(_collection_name("x" * 100)) <= 63
 
 
 def test_collection_name_deterministic():
     assert _collection_name("vid123") == _collection_name("vid123")
+
+
+def test_sanitize_replaces_hyphens():
+    assert "-" not in _sanitize_video_id("abc-def")
+    assert _sanitize_video_id("abc-def") == "abc_def"
+
+
+def test_sanitize_replaces_dots():
+    assert _sanitize_video_id("a.b.c") == "a_b_c"
+
+
+def test_sanitize_replaces_slashes():
+    assert _sanitize_video_id("a/b") == "a_b"
+
+
+def test_sanitize_preserves_alphanumeric_and_underscore():
+    assert _sanitize_video_id("abc_123_XYZ") == "abc_123_XYZ"
+
+
+def test_sanitize_replaces_spaces():
+    assert " " not in _sanitize_video_id("hello world")
+
+
+def test_collection_name_only_alphanumeric_and_underscore():
+    import re
+
+    name = _collection_name("a.b-c/d e!f")
+    # strip the known "video_" prefix then check the rest
+    assert re.fullmatch(r"[a-zA-Z0-9_]+", name)
 
 
 # ---------------------------------------------------------------------------

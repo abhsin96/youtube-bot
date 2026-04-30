@@ -9,11 +9,17 @@ from langchain_core.embeddings import Embeddings
 logger = structlog.get_logger(__name__)
 
 
+def _sanitize_video_id(video_id: str) -> str:
+    """Replace every non-alphanumeric, non-underscore character with '_'."""
+    import re
+
+    return re.sub(r"[^a-zA-Z0-9_]", "_", video_id)
+
+
 def _collection_name(video_id: str) -> str:
-    # Chroma collection names must be 3-63 chars, alphanumeric + hyphens/underscores.
-    # Prefix with "vid-" to guarantee minimum length for short IDs.
-    safe = video_id.replace(".", "-").replace("/", "-")
-    return f"vid-{safe}"[:63]
+    # Chroma names: 3-63 chars, alphanumeric + hyphens/underscores.
+    # We use only alphanumeric + underscore; prefix guarantees >= 7 chars.
+    return f"video_{_sanitize_video_id(video_id)}"[:63]
 
 
 def _make_store(
