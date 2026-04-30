@@ -1,7 +1,9 @@
 from enum import StrEnum
+from threading import Lock
 from typing import TypedDict
 
 import structlog
+from cachetools import TTLCache, cached
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     IpBlocked,
@@ -12,6 +14,9 @@ from youtube_transcript_api._errors import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_CACHE: TTLCache = TTLCache(maxsize=50, ttl=3600)
+_LOCK = Lock()
 
 
 class TranscriptSegment(TypedDict):
@@ -33,6 +38,7 @@ class TranscriptError(Exception):
         self.code = code
 
 
+@cached(cache=_CACHE, lock=_LOCK, key=lambda video_id, languages=("en",): (video_id, languages))
 def fetch_transcript(
     video_id: str,
     languages: tuple[str, ...] = ("en",),

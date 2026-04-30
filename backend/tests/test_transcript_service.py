@@ -9,12 +9,20 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
-from src.transcript_service import ErrorCode, TranscriptError, fetch_transcript
+from src.transcript_service import _CACHE, ErrorCode, TranscriptError, fetch_transcript
 
 _FAKE_SNIPPETS = [
     MagicMock(text="Hello world", start=0.0, duration=2.5),
     MagicMock(text="How are you", start=2.5, duration=3.0),
 ]
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    _CACHE.clear()
+
+
+# --- happy path ---
 
 
 @patch("src.transcript_service.YouTubeTranscriptApi")
@@ -31,6 +39,9 @@ def test_fetch_returns_list_of_dicts(MockApi):
 def test_fetch_empty_transcript(MockApi):
     MockApi.return_value.fetch.return_value = []
     assert fetch_transcript("abc123") == []
+
+
+# --- error mapping ---
 
 
 @pytest.mark.parametrize(
@@ -74,3 +85,43 @@ def test_original_exception_chained(MockApi):
     with pytest.raises(TranscriptError) as exc_info:
         fetch_transcript("abc123")
     assert exc_info.value.__cause__ is original
+
+
+# --- cache ---
+
+
+@patch("src.transcript_service.YouTubeTranscriptApi")
+def test_second_call_uses_cache(MockApi):
+    MockApi.return_value.fetch.return_value = _FAKE_SNIPPETS
+    fetch_transcript("cached-id")
+    fetch_transcript("cached-id")
+    assert MockApi.return_value.fetch.call_count == 1
+
+
+@patch("src.transcript_service.YouTubeTranscriptApi")
+def test_different_video_ids_are_cached_separately(MockApi):
+    MockApi.return_value.fetch.return_value = _FAKE_SNIPPETS
+    fetch_transcript("vid-a")
+    fetch_transcript("vid-b")
+    fetch_transcript("vid-a")
+    assert MockApi.return_value.fetch.call_count == 2
+
+
+@patch("src.transcript_service.YouTubeTranscriptApi")
+def test_different_languages_are_cached_separately(MockApi):
+    MockApi.return_value.fetch.return_value = _FAKE_SNIPPETS
+    fetch_transcript("vid-x", languages=("en",))
+    fetch_transcript("vid-x", languages=("fr",))
+    assert MockApi.return_value.fetch.call_count == 2
+
+
+def test_cache_max_size():
+    from src.transcript_service import _CACHE
+
+    assert _CACHE.maxsize == 50
+
+
+def test_cache_ttl():
+    from src.transcript_service import _CACHE
+
+    assert _CACHE.ttl == 3600
