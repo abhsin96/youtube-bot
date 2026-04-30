@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p backend/src backend/tests backend/prompts backend/graphs)",
+      "Bash(touch backend/src/__init__.py backend/tests/__init__.py)",
+      "Bash(python3 -m venv backend/venv)",
+      "Bash(backend/venv/bin/python --version)",
+      "Bash(backend/venv/bin/pip install *)",
+      "Bash(make check *)"
+    ]
+  }
+}
