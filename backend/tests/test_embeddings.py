@@ -1,9 +1,22 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 
 from src.config import Settings
-from src.embeddings import get_embeddings
+from src.embeddings import embed_chunks, get_embeddings
+
+_DIM = 4
+
+
+def _fake_embedding(dim: int = _DIM):
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda texts: [[float(i)] * dim for i in range(len(texts))]
+    return emb
+
+
+def _docs(n: int) -> list[Document]:
+    return [Document(page_content=f"chunk {i}") for i in range(n)]
 
 
 def _settings(**overrides) -> Settings:
@@ -63,3 +76,60 @@ def test_construction_does_not_call_openai():
     with patch("httpx.Client.send") as mock_send:
         get_embeddings(_settings())
     mock_send.assert_not_called()
+
+
+# --- embed_chunks ---
+
+
+def test_embed_chunks_returns_doc_vector_pairs():
+    pairs = embed_chunks(_docs(3), _fake_embedding())
+    assert len(pairs) == 3
+    assert all(isinstance(doc, Document) for doc, _ in pairs)
+    assert all(isinstance(vec, list) for _, vec in pairs)
+
+
+def test_embed_chunks_vector_length():
+    pairs = embed_chunks(_docs(5), _fake_embedding())
+    assert all(len(vec) == _DIM for _, vec in pairs)
+
+
+def test_embed_chunks_preserves_document_identity():
+    docs = _docs(3)
+    pairs = embed_chunks(docs, _fake_embedding())
+    assert [doc for doc, _ in pairs] == docs
+
+
+def test_embed_chunks_empty_input():
+    assert embed_chunks([], _fake_embedding()) == []
+
+
+def test_embed_chunks_single_batch_calls_embed_documents_once():
+    emb = _fake_embedding()
+    embed_chunks(_docs(5), emb, batch_size=10)
+    assert emb.embed_documents.call_count == 1
+
+
+def test_embed_chunks_batching_splits_calls():
+    emb = _fake_embedding()
+    embed_chunks(_docs(7), emb, batch_size=3)
+    # 7 docs / batch_size 3 → 3 batches (3+3+1)
+    assert emb.embed_documents.call_count == 3
+
+
+def test_embed_chunks_exact_batch_boundary():
+    emb = _fake_embedding()
+    embed_chunks(_docs(6), emb, batch_size=3)
+    assert emb.embed_documents.call_count == 2
+
+
+def test_embed_chunks_batch_size_one():
+    emb = _fake_embedding()
+    embed_chunks(_docs(4), emb, batch_size=1)
+    assert emb.embed_documents.call_count == 4
+
+
+def test_embed_chunks_vectors_match_order():
+    # _fake_embedding returns [float(i)]*dim for the i-th text in the batch
+    pairs = embed_chunks(_docs(3), _fake_embedding())
+    for idx, (_, vec) in enumerate(pairs):
+        assert vec == [float(idx)] * _DIM
