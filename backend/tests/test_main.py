@@ -25,17 +25,28 @@ def test_health_returns_200(client):
     assert isinstance(body["langsmith_enabled"], bool)
 
 
-def test_cors_preflight_chrome_extension(client):
-    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+PREFLIGHT_ORIGINS = [
+    "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost",
+]
+
+
+@pytest.mark.parametrize("origin", PREFLIGHT_ORIGINS)
+def test_cors_preflight_allowed_origins(client, origin):
     response = client.options(
         "/health",
         headers={
             "Origin": origin,
-            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Method": "POST",
         },
     )
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") == origin
+    allowed_methods = response.headers.get("access-control-allow-methods", "")
+    for method in ("GET", "POST", "DELETE", "OPTIONS"):
+        assert method in allowed_methods
 
 
 def test_missing_openai_key_raises_validation_error():
