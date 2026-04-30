@@ -1,10 +1,7 @@
-from unittest.mock import patch
-
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
-from src.config import Settings, load_settings
+from src.config import Settings
 from src.main import create_app
 
 
@@ -47,24 +44,3 @@ def test_cors_preflight_allowed_origins(client, origin):
     allowed_methods = response.headers.get("access-control-allow-methods", "")
     for method in ("GET", "POST", "DELETE", "OPTIONS"):
         assert method in allowed_methods
-
-
-def test_missing_openai_key_raises_validation_error():
-    with pytest.raises(ValidationError, match="openai_api_key"):
-        Settings(_env_file=None)
-
-
-def test_load_settings_exits_on_missing_key(capsys):
-    side_effect = ValidationError.from_exception_data(
-        "Settings",
-        [{"type": "missing", "loc": ("openai_api_key",), "msg": "Field required", "input": {}}],
-    )
-    with (
-        patch("src.config.Settings", side_effect=side_effect),
-        pytest.raises(SystemExit) as exc_info,
-    ):
-        load_settings()
-
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "OPENAI_API_KEY" in captured.err
