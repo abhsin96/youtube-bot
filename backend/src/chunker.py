@@ -1,3 +1,5 @@
+import uuid
+
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -54,8 +56,8 @@ class TimestampAwareTextSplitter:
 
             chunk_start = idx
             chunk_end = idx + len(chunk_text)
-            # Advance cursor by 1 so next chunk (which may overlap) is found
-            # at or after this position, but never earlier.
+            # Advance by 1 so the next (possibly overlapping) chunk is found
+            # at or after this position, never earlier.
             search_from = idx + 1
 
             overlapping = [
@@ -70,7 +72,28 @@ class TimestampAwareTextSplitter:
                 **overlapping[0].metadata,
                 "start_ts": overlapping[0].metadata["start_ts"],
                 "end_ts": overlapping[-1].metadata["end_ts"],
+                "chunk_id": str(uuid.uuid4()),
             }
             result.append(Document(page_content=chunk_text, metadata=metadata))
 
         return result
+
+
+def chunk_documents(
+    docs: list[Document],
+    target_tokens: int = 500,
+    overlap_tokens: int = 50,
+) -> list[Document]:
+    """Public contract: split segment Documents into token-bounded chunks.
+
+    Each output Document has:
+      - page_content: concatenated text from one or more source segments
+      - metadata.start_ts:  start timestamp of the first contributing segment (seconds)
+      - metadata.end_ts:    end timestamp of the last contributing segment (seconds)
+      - metadata.chunk_id:  unique UUID string per chunk
+      - metadata.video_id:  propagated from the source segments
+    """
+    return TimestampAwareTextSplitter(
+        chunk_size=target_tokens,
+        chunk_overlap=overlap_tokens,
+    ).split_documents(docs)
