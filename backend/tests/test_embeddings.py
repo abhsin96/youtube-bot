@@ -6,7 +6,7 @@ from langchain_openai import OpenAIEmbeddings
 from openai import APIConnectionError, RateLimitError
 
 from src.config import Settings
-from src.embeddings import embed_chunks, get_embeddings
+from src.embeddings import _estimate_cost, _model_name, embed_chunks, get_embeddings
 
 _DIM = 4
 
@@ -201,3 +201,51 @@ def test_retry_result_correct_after_two_failures(mock_sleep):
     emb.embed_documents.side_effect = [_rate_limit_error(), _rate_limit_error(), expected]
     pairs = embed_chunks([Document(page_content="hello")], emb)
     assert pairs[0][1] == [0.1, 0.2]
+
+
+# --- token count and cost logging ---
+
+
+def test_model_name_from_openai_embeddings():
+    emb = MagicMock()
+    emb.model = "text-embedding-3-small"
+    assert _model_name(emb) == "text-embedding-3-small"
+
+
+def test_model_name_unknown_when_no_attribute():
+    assert _model_name(MagicMock(spec=[])) == "unknown"
+
+
+def test_estimate_cost_known_model():
+    # 1 000 tokens at $0.00002/1K = $0.00002
+    assert _estimate_cost(1000, "text-embedding-3-small") == pytest.approx(0.00002)
+
+
+def test_estimate_cost_large_model():
+    assert _estimate_cost(1000, "text-embedding-3-large") == pytest.approx(0.00013)
+
+
+def test_estimate_cost_unknown_model_uses_fallback():
+    cost = _estimate_cost(1000, "some-future-model")
+    assert cost > 0
+
+
+def test_estimate_cost_zero_tokens():
+    assert _estimate_cost(0, "text-embedding-3-small") == 0.0
+
+
+def test_embed_chunks_logs_token_count_and_cost(caplog):
+    emb = MagicMock()
+    emb.model = "text-embedding-3-small"
+    emb.embed_documents.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
+
+    with patch("src.embeddings.logger") as mock_logger:
+        embed_chunks([Document(page_content="hello world")], emb)
+
+    call_kwargs = mock_logger.info.call_args
+    assert call_kwargs is not None
+    _, kwargs = call_kwargs
+    assert kwargs["token_count"] > 0
+    assert kwargs["estimated_cost_usd"] >= 0.0
+    assert kwargs["model"] == "text-embedding-3-small"
+    assert kwargs["chunks"] == 1
