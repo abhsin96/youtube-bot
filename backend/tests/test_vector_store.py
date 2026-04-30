@@ -185,3 +185,119 @@ def test_separate_video_ids_use_separate_collections(tmp_db):
     delete_collection("vid-a", tmp_db)
     assert not collection_exists("vid-a", tmp_db)
     assert collection_exists("vid-b", tmp_db)
+
+
+# ---------------------------------------------------------------------------
+# Round-trip: add then query — verify content comes back
+# ---------------------------------------------------------------------------
+
+
+def test_roundtrip_query_returns_added_content(tmp_db):
+    emb = _fake_embedding()
+    docs = _docs(3)
+    add_documents("vid1", docs, emb, tmp_db)
+    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=3)
+    returned_texts = {d.page_content for d in results}
+    added_texts = {d.page_content for d in docs}
+    assert returned_texts == added_texts
+
+
+def test_roundtrip_metadata_preserved(tmp_db):
+    emb = _fake_embedding()
+    docs = _docs(2)
+    add_documents("vid1", docs, emb, tmp_db)
+    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=2)
+    for result in results:
+        assert "video_id" in result.metadata
+        assert "start_ts" in result.metadata
+        assert "end_ts" in result.metadata
+        assert "chunk_id" in result.metadata
+
+
+def test_roundtrip_k_limits_results(tmp_db):
+    emb = _fake_embedding()
+    add_documents("vid1", _docs(5), emb, tmp_db)
+    for k in (1, 2, 3):
+        results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=k)
+        assert len(results) <= k
+
+
+# ---------------------------------------------------------------------------
+# Collection isolation: querying vid-a never returns vid-b documents
+# ---------------------------------------------------------------------------
+
+
+def test_query_isolation_between_collections(tmp_db):
+    emb = _fake_embedding()
+    docs_a = [
+        Document(
+            page_content="alpha content unique to video A",
+            metadata={"video_id": "vid-a", "start_ts": 0.0, "end_ts": 1.0, "chunk_id": "a0"},
+        )
+    ]
+    docs_b = [
+        Document(
+            page_content="beta content unique to video B",
+            metadata={"video_id": "vid-b", "start_ts": 0.0, "end_ts": 1.0, "chunk_id": "b0"},
+        )
+    ]
+    add_documents("vid-a", docs_a, emb, tmp_db)
+    add_documents("vid-b", docs_b, emb, tmp_db)
+
+    results_a = query("vid-a", [0.0] * _DIM, emb, tmp_db, k=5)
+    texts_a = {d.page_content for d in results_a}
+    assert all("alpha" in t for t in texts_a), "vid-a results should only contain vid-a docs"
+    assert not any("beta" in t for t in texts_a)
+
+
+def test_delete_one_collection_does_not_affect_other(tmp_db):
+    emb = _fake_embedding()
+    add_documents("vid-a", _docs(2), emb, tmp_db)
+    add_documents("vid-b", _docs(2), emb, tmp_db)
+    delete_collection("vid-a", tmp_db)
+    # vid-b should still be queryable
+    results = query("vid-b", [0.0] * _DIM, emb, tmp_db, k=2)
+    assert len(results) > 0
+
+
+# ---------------------------------------------------------------------------
+# Persistence: re-initialise client and verify data survives
+# ---------------------------------------------------------------------------
+
+
+def test_data_persists_across_client_reinit(tmp_db):
+    emb = _fake_embedding()
+    docs = _docs(3)
+    add_documents("vid1", docs, emb, tmp_db)
+
+    # Simulate a server restart: call query with a fresh client (same path)
+    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=3)
+    assert len(results) == 3
+    assert {d.page_content for d in results} == {d.page_content for d in docs}
+
+
+def test_collection_exists_survives_client_reinit(tmp_db):
+    emb = _fake_embedding()
+    add_documents("vid1", _docs(1), emb, tmp_db)
+    # collection_exists uses _get_client internally — always a fresh client
+    assert collection_exists("vid1", tmp_db) is True
+
+
+def test_deleted_collection_absent_after_reinit(tmp_db):
+    emb = _fake_embedding()
+    add_documents("vid1", _docs(2), emb, tmp_db)
+    delete_collection("vid1", tmp_db)
+    # Fresh client via collection_exists
+    assert collection_exists("vid1", tmp_db) is False
+
+
+def test_two_video_ids_persist_independently(tmp_db):
+    emb = _fake_embedding()
+    add_documents("persist-a", _docs(2), emb, tmp_db)
+    add_documents("persist-b", _docs(2), emb, tmp_db)
+
+    # Both collections survive re-reads
+    assert collection_exists("persist-a", tmp_db)
+    assert collection_exists("persist-b", tmp_db)
+    results = query("persist-a", [0.0] * _DIM, emb, tmp_db, k=2)
+    assert len(results) > 0
