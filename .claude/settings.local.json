@@ -8,7 +8,10 @@
       "Bash(backend/venv/bin/pip install *)",
       "Bash(make check *)",
       "Bash(make test *)",
-      "Bash(chmod +x *)"
+      "Bash(chmod +x *)",
+      "Bash(venv/bin/pytest *)",
+      "Bash(venv/bin/ruff check *)",
+      "Bash(venv/bin/black *)"
     ]
   }
 }
