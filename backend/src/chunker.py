@@ -1,17 +1,20 @@
 import uuid
+from collections.abc import Iterable
 
+import tiktoken
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 _SEP = " "
 
 
-class TimestampAwareTextSplitter:
-    """Wraps RecursiveCharacterTextSplitter and restores start_ts/end_ts per chunk.
+class TimestampAwareTextSplitter(RecursiveCharacterTextSplitter):
+    """RecursiveCharacterTextSplitter that preserves start_ts / end_ts metadata.
 
-    Off-the-shelf splitters discard per-segment metadata when merging segments
-    into chunks.  This class rebuilds timestamps by mapping each output chunk
-    back to the source segments it was drawn from.
+    The base splitter splits each document independently and copies its metadata
+    to every resulting chunk.  This subclass instead treats all source segments
+    as one stream, splits the combined text, then walks back through the source
+    segments to assign the correct start_ts and end_ts to each chunk.
     """
 
     def __init__(
@@ -19,32 +22,43 @@ class TimestampAwareTextSplitter:
         chunk_size: int = 500,
         chunk_overlap: int = 50,
         encoding_name: str = "cl100k_base",
+        **kwargs,
     ) -> None:
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self._splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-            encoding_name=encoding_name,
+        enc = tiktoken.get_encoding(encoding_name)
+        super().__init__(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            length_function=lambda text: len(enc.encode(text)),
+            **kwargs,
         )
 
-    def split_documents(self, documents: list[Document]) -> list[Document]:
-        if not documents:
+    # ------------------------------------------------------------------
+    # Override: split across all source segments as one combined stream,
+    # then rebuild timestamps from the source segment positions.
+    # ------------------------------------------------------------------
+
+    def split_documents(self, documents: Iterable[Document]) -> list[Document]:
+        docs = list(documents)
+        if not docs:
             return []
 
-        # Build combined text and record each source doc's char range within it.
+        # 1. Build combined text; record each source doc's char range.
         parts: list[str] = []
-        positions: list[tuple[int, int]] = []  # (start_char, end_char) inclusive-exclusive
+        positions: list[tuple[int, int]] = []  # (start_char, end_char) in combined
         cursor = 0
-        for doc in documents:
+        for doc in docs:
             text = doc.page_content
             parts.append(text)
             positions.append((cursor, cursor + len(text)))
             cursor += len(text) + len(_SEP)
 
         combined = _SEP.join(parts)
-        raw_chunks = self._splitter.split_text(combined)
 
+        # 2. Delegate text splitting to the parent implementation.
+        raw_chunks = self.split_text(combined)
+
+        # 3. Walk raw_chunks left-to-right; find each chunk's char range in
+        #    combined and map it back to the overlapping source segments.
         result: list[Document] = []
         search_from = 0
         for chunk_text in raw_chunks:
@@ -56,13 +70,11 @@ class TimestampAwareTextSplitter:
 
             chunk_start = idx
             chunk_end = idx + len(chunk_text)
-            # Advance by 1 so the next (possibly overlapping) chunk is found
-            # at or after this position, never earlier.
-            search_from = idx + 1
+            search_from = idx + 1  # next chunk starts at or after here
 
             overlapping = [
                 doc
-                for doc, (s, e) in zip(documents, positions, strict=True)
+                for doc, (s, e) in zip(docs, positions, strict=True)
                 if s < chunk_end and e > chunk_start
             ]
             if not overlapping:
@@ -84,14 +96,15 @@ def chunk_documents(
     target_tokens: int = 500,
     overlap_tokens: int = 50,
 ) -> list[Document]:
-    """Public contract: split segment Documents into token-bounded chunks.
+    """Split segment Documents into token-bounded chunks.
 
     Each output Document has:
-      - page_content: concatenated text from one or more source segments
-      - metadata.start_ts:  start timestamp of the first contributing segment (seconds)
-      - metadata.end_ts:    end timestamp of the last contributing segment (seconds)
-      - metadata.chunk_id:  unique UUID string per chunk
-      - metadata.video_id:  propagated from the source segments
+      page_content  — concatenated text from one or more source segments
+      metadata:
+        start_ts    — start of the first contributing segment (seconds)
+        end_ts      — end of the last contributing segment (seconds)
+        chunk_id    — unique UUID4 string
+        video_id    — propagated from source segments
     """
     return TimestampAwareTextSplitter(
         chunk_size=target_tokens,
