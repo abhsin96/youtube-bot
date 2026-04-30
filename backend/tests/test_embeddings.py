@@ -1,7 +1,9 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
+from openai import APIConnectionError, RateLimitError
 
 from src.config import Settings
 from src.embeddings import embed_chunks, get_embeddings
@@ -133,3 +135,69 @@ def test_embed_chunks_vectors_match_order():
     pairs = embed_chunks(_docs(3), _fake_embedding())
     for idx, (_, vec) in enumerate(pairs):
         assert vec == [float(idx)] * _DIM
+
+
+# --- retry behaviour ---
+
+_GOOD_VECTORS = [[1.0, 2.0], [3.0, 4.0]]
+
+
+def _rate_limit_error() -> RateLimitError:
+    return RateLimitError("rate limited", response=MagicMock(), body={})
+
+
+def _connection_error() -> APIConnectionError:
+    return APIConnectionError(request=MagicMock())
+
+
+@patch("time.sleep")
+def test_retry_succeeds_after_two_rate_limit_errors(mock_sleep):
+    emb = MagicMock()
+    emb.embed_documents.side_effect = [
+        _rate_limit_error(),
+        _rate_limit_error(),
+        _GOOD_VECTORS,
+    ]
+    pairs = embed_chunks([Document(page_content="a"), Document(page_content="b")], emb)
+    assert emb.embed_documents.call_count == 3
+    assert [vec for _, vec in pairs] == _GOOD_VECTORS
+
+
+@patch("time.sleep")
+def test_retry_succeeds_after_one_connection_error(mock_sleep):
+    emb = MagicMock()
+    emb.embed_documents.side_effect = [_connection_error(), _GOOD_VECTORS]
+    pairs = embed_chunks([Document(page_content="a"), Document(page_content="b")], emb)
+    assert emb.embed_documents.call_count == 2
+    assert [vec for _, vec in pairs] == _GOOD_VECTORS
+
+
+@patch("time.sleep")
+def test_retry_reraises_after_three_failures(mock_sleep):
+    emb = MagicMock()
+    emb.embed_documents.side_effect = [
+        _rate_limit_error(),
+        _rate_limit_error(),
+        _rate_limit_error(),
+    ]
+    with pytest.raises(RateLimitError):
+        embed_chunks([Document(page_content="x")], emb)
+    assert emb.embed_documents.call_count == 3
+
+
+@patch("time.sleep")
+def test_non_transient_error_not_retried(mock_sleep):
+    emb = MagicMock()
+    emb.embed_documents.side_effect = ValueError("bad input")
+    with pytest.raises(ValueError, match="bad input"):
+        embed_chunks([Document(page_content="x")], emb)
+    assert emb.embed_documents.call_count == 1
+
+
+@patch("time.sleep")
+def test_retry_result_correct_after_two_failures(mock_sleep):
+    expected = [[0.1, 0.2]]
+    emb = MagicMock()
+    emb.embed_documents.side_effect = [_rate_limit_error(), _rate_limit_error(), expected]
+    pairs = embed_chunks([Document(page_content="hello")], emb)
+    assert pairs[0][1] == [0.1, 0.2]
