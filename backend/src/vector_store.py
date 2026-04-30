@@ -1,18 +1,20 @@
+import re
 from pathlib import Path
 
 import chromadb
 import structlog
+from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 logger = structlog.get_logger(__name__)
 
+_NO_TELEMETRY = ChromaSettings(anonymized_telemetry=False)
+
 
 def _sanitize_video_id(video_id: str) -> str:
     """Replace every non-alphanumeric, non-underscore character with '_'."""
-    import re
-
     return re.sub(r"[^a-zA-Z0-9_]", "_", video_id)
 
 
@@ -22,6 +24,13 @@ def _collection_name(video_id: str) -> str:
     return f"video_{_sanitize_video_id(video_id)}"[:63]
 
 
+def _get_client(persist_directory: str | Path) -> chromadb.ClientAPI:
+    """Return a PersistentClient with telemetry disabled; create folder if absent."""
+    db_path = Path(persist_directory)
+    db_path.mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=str(db_path), settings=_NO_TELEMETRY)
+
+
 def _make_store(
     video_id: str,
     embedding: Embeddings,
@@ -29,10 +38,11 @@ def _make_store(
     *,
     create: bool = True,
 ) -> Chroma:
+    client = _get_client(persist_directory)
     return Chroma(
+        client=client,
         collection_name=_collection_name(video_id),
         embedding_function=embedding,
-        persist_directory=str(persist_directory),
         create_collection_if_not_exists=create,
     )
 
@@ -65,15 +75,14 @@ def query(
 
 def collection_exists(video_id: str, persist_directory: str | Path) -> bool:
     """Return True if a collection for *video_id* already exists on disk."""
-    client = chromadb.PersistentClient(path=str(persist_directory))
-    name = _collection_name(video_id)
+    client = _get_client(persist_directory)
     existing = {c.name for c in client.list_collections()}
-    return name in existing
+    return _collection_name(video_id) in existing
 
 
 def delete_collection(video_id: str, persist_directory: str | Path) -> None:
     """Delete the Chroma collection for *video_id* (no-op if absent)."""
-    client = chromadb.PersistentClient(path=str(persist_directory))
+    client = _get_client(persist_directory)
     name = _collection_name(video_id)
     existing = {c.name for c in client.list_collections()}
     if name in existing:

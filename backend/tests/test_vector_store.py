@@ -5,6 +5,7 @@ from langchain_core.documents import Document
 
 from src.vector_store import (
     _collection_name,
+    _get_client,
     _sanitize_video_id,
     add_documents,
     collection_exists,
@@ -90,6 +91,30 @@ def test_collection_name_only_alphanumeric_and_underscore():
     name = _collection_name("a.b-c/d e!f")
     # strip the known "video_" prefix then check the rest
     assert re.fullmatch(r"[a-zA-Z0-9_]+", name)
+
+
+# ---------------------------------------------------------------------------
+# _get_client
+# ---------------------------------------------------------------------------
+
+
+def test_get_client_creates_directory(tmp_path):
+    db_path = tmp_path / "nested" / "chroma"
+    assert not db_path.exists()
+    _get_client(db_path)
+    assert db_path.exists()
+
+
+def test_get_client_telemetry_disabled(tmp_path):
+    client = _get_client(tmp_path / "chroma")
+    assert client.get_settings().anonymized_telemetry is False
+
+
+def test_get_client_idempotent(tmp_path):
+    db_path = tmp_path / "chroma"
+    _get_client(db_path)
+    _get_client(db_path)  # must not raise on second call
+    assert db_path.exists()
 
 
 # ---------------------------------------------------------------------------
