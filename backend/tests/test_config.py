@@ -72,6 +72,16 @@ def test_max_history_turns_below_one():
         make(max_history_turns=0)
 
 
+# --- load_settings ---
+
+
+def test_load_settings_happy_path(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-happy")
+    s = load_settings()
+    assert s.openai_api_key == "sk-test-happy"
+    assert isinstance(s, Settings)
+
+
 # --- load_settings error path ---
 
 
