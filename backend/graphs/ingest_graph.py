@@ -55,7 +55,7 @@ from src.chunker import chunk_documents as _chunk_documents  # noqa: E402
 from src.document_converter import segments_to_documents  # noqa: E402
 from src.embeddings import embed_chunks  # noqa: E402
 from src.transcript_service import TranscriptSegment, fetch_transcript  # noqa: E402
-from src.vector_store import add_documents, collection_exists  # noqa: E402
+from src.vector_store import add_documents, collection_exists, delete_collection  # noqa: E402
 
 logger = structlog.get_logger(__name__)
 
@@ -224,6 +224,24 @@ def store_node(state: IngestState) -> dict:
     return {"status": "done", "error": None}
 
 
+def rollback_node(state: IngestState) -> dict:
+    """Delete any partially-built collection so a retry starts clean.
+
+    Called on every error path.  delete_collection is a no-op when the
+    collection does not yet exist, so it is safe to call from any node —
+    including early failures before add_documents ever ran.
+
+    Does NOT overwrite status/error; the originating node already set them.
+    """
+    try:
+        delete_collection(state["video_id"], state["vector_db_path"])
+        logger.info("rollback complete", video_id=state["video_id"])
+    except Exception as exc:
+        # Log but do not mask the original error that triggered rollback.
+        logger.error("rollback failed", video_id=state["video_id"], error=str(exc))
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
@@ -232,27 +250,27 @@ def store_node(state: IngestState) -> dict:
 def route_idempotency(state: IngestState) -> str:
     """Conditional edge after idempotency_check_node.
 
-    skipped → END  (collection already exists; caller reads status="skipped")
-    error   → END  (storage unavailable)
-    running → "fetch_transcript_node"
+    skipped → END          (collection already exists; force=False)
+    error   → rollback_node
+    running → fetch_transcript_node
     """
-    from langgraph.graph import END
+    if state["status"] == "skipped":
+        from langgraph.graph import END
 
-    if state["status"] in ("skipped", "error"):
         return END
+    if state["status"] == "error":
+        return "rollback_node"
     return "fetch_transcript_node"
 
 
 def route_on_error(state: IngestState) -> str:
-    """Conditional edge after fetch_transcript_node, chunk_node, embed_node.
+    """Conditional edge after fetch_transcript_node, chunk_node, embed_node, store_node.
 
-    error → END
-    *     → next node (caller supplies the target via the edge mapping)
+    error → rollback_node
+    *     → next node (caller resolves "_ok" via the edge mapping dict)
     """
-    from langgraph.graph import END
-
     if state["status"] == "error":
-        return END
+        return "rollback_node"
     return "_ok"
 
 
@@ -267,14 +285,17 @@ def build_graph():
     Topology
     ────────
     idempotency_check_node
-        ├─ skipped/error → END
-        └─ running       → fetch_transcript_node
-                               ├─ error → END
-                               └─ ok    → chunk_node
-                                              ├─ error → END
-                                              └─ ok    → embed_node
-                                                             ├─ error → END
-                                                             └─ ok    → store_node → END
+        ├─ skipped          → END
+        ├─ error            → rollback_node → END
+        └─ running          → fetch_transcript_node
+                                 ├─ error → rollback_node → END
+                                 └─ ok    → chunk_node
+                                                ├─ error → rollback_node → END
+                                                └─ ok    → embed_node
+                                                               ├─ error → rollback_node → END
+                                                               └─ ok    → store_node
+                                                                              ├─ error → rollback_node → END
+                                                                              └─ ok    → END
     """
     from langgraph.graph import END, StateGraph
 
@@ -285,32 +306,39 @@ def build_graph():
     g.add_node("chunk_node", chunk_node)
     g.add_node("embed_node", embed_node)
     g.add_node("store_node", store_node)
+    g.add_node("rollback_node", rollback_node)
 
     g.set_entry_point("idempotency_check_node")
 
-    # idempotency → skip to END or proceed to fetch
     g.add_conditional_edges(
         "idempotency_check_node",
         route_idempotency,
-        {"fetch_transcript_node": "fetch_transcript_node", END: END},
+        {
+            "fetch_transcript_node": "fetch_transcript_node",
+            "rollback_node": "rollback_node",
+            END: END,
+        },
     )
-
-    # each subsequent node short-circuits to END on error, else advances
     g.add_conditional_edges(
         "fetch_transcript_node",
         route_on_error,
-        {"_ok": "chunk_node", END: END},
+        {"_ok": "chunk_node", "rollback_node": "rollback_node"},
     )
     g.add_conditional_edges(
         "chunk_node",
         route_on_error,
-        {"_ok": "embed_node", END: END},
+        {"_ok": "embed_node", "rollback_node": "rollback_node"},
     )
     g.add_conditional_edges(
         "embed_node",
         route_on_error,
-        {"_ok": "store_node", END: END},
+        {"_ok": "store_node", "rollback_node": "rollback_node"},
     )
-    g.add_edge("store_node", END)
+    g.add_conditional_edges(
+        "store_node",
+        route_on_error,
+        {"_ok": END, "rollback_node": "rollback_node"},
+    )
+    g.add_edge("rollback_node", END)
 
     return g.compile()

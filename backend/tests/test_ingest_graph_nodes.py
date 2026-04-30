@@ -9,6 +9,7 @@ from graphs.ingest_graph import (
     embed_node,
     fetch_transcript_node,
     idempotency_check_node,
+    rollback_node,
     route_idempotency,
     route_on_error,
     store_node,
@@ -199,10 +200,8 @@ def test_route_idempotency_skipped_goes_to_end():
     assert route_idempotency(_state(status="skipped")) == END
 
 
-def test_route_idempotency_error_goes_to_end():
-    from langgraph.graph import END
-
-    assert route_idempotency(_state(status="error")) == END
+def test_route_idempotency_error_goes_to_rollback():
+    assert route_idempotency(_state(status="error")) == "rollback_node"
 
 
 def test_route_idempotency_running_goes_to_fetch():
@@ -214,10 +213,8 @@ def test_route_idempotency_running_goes_to_fetch():
 # ---------------------------------------------------------------------------
 
 
-def test_route_on_error_returns_end_on_error():
-    from langgraph.graph import END
-
-    assert route_on_error(_state(status="error")) == END
+def test_route_on_error_returns_rollback_on_error():
+    assert route_on_error(_state(status="error")) == "rollback_node"
 
 
 def test_route_on_error_returns_ok_on_running():
@@ -293,8 +290,126 @@ def test_graph_stops_at_embed_error():
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("rate limit")),
+        patch("graphs.ingest_graph.delete_collection"),
     ):
         result = build_graph().invoke(_state())
 
     assert result["status"] == "error"
     assert result["embedded_chunks"] == []  # store_node never ran
+
+
+# ---------------------------------------------------------------------------
+# rollback_node (unit)
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_calls_delete_collection():
+    with patch("graphs.ingest_graph.delete_collection") as mock_del:
+        rollback_node(_state(video_id="vid1", vector_db_path="/db", status="error"))
+    mock_del.assert_called_once_with("vid1", "/db")
+
+
+def test_rollback_returns_empty_dict():
+    with patch("graphs.ingest_graph.delete_collection"):
+        result = rollback_node(_state(status="error", error="something failed"))
+    assert result == {}
+
+
+def test_rollback_preserves_error_in_state():
+    # rollback returns {}, so LangGraph keeps the existing status/error untouched
+    with patch("graphs.ingest_graph.delete_collection"):
+        delta = rollback_node(_state(status="error", error="original error"))
+    assert "status" not in delta
+    assert "error" not in delta
+
+
+def test_rollback_tolerates_delete_failure():
+    with patch("graphs.ingest_graph.delete_collection", side_effect=RuntimeError("disk full")):
+        # must not raise — original error should remain surfaceable
+        result = rollback_node(_state(status="error"))
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Rollback integration: embed_node failure → collection deleted
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_called_on_embed_failure(tmp_path):
+    db = tmp_path / "chroma"
+    with (
+        patch("graphs.ingest_graph.collection_exists", return_value=False),
+        patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("rate limit")),
+        patch("graphs.ingest_graph.delete_collection") as mock_del,
+    ):
+        result = build_graph().invoke(_state(vector_db_path=str(db)))
+
+    assert result["status"] == "error"
+    mock_del.assert_called_once_with("vid1", str(db))
+
+
+def test_rollback_called_on_store_failure(tmp_path):
+    db = tmp_path / "chroma"
+    with (
+        patch("graphs.ingest_graph.collection_exists", return_value=False),
+        patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
+        patch("graphs.ingest_graph.add_documents", side_effect=RuntimeError("chroma down")),
+        patch("graphs.ingest_graph.delete_collection") as mock_del,
+    ):
+        result = build_graph().invoke(_state(vector_db_path=str(db)))
+
+    assert result["status"] == "error"
+    mock_del.assert_called_once_with("vid1", str(db))
+
+
+def test_rollback_not_called_on_success(tmp_path):
+    db = tmp_path / "chroma"
+    with (
+        patch("graphs.ingest_graph.collection_exists", return_value=False),
+        patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
+        patch("graphs.ingest_graph.add_documents"),
+        patch("graphs.ingest_graph.delete_collection") as mock_del,
+    ):
+        result = build_graph().invoke(_state(vector_db_path=str(db)))
+
+    assert result["status"] == "done"
+    mock_del.assert_not_called()
+
+
+def test_retry_succeeds_after_rollback(tmp_path):
+    """After a failed run (collection deleted), a second run completes."""
+    db = tmp_path / "chroma"
+    base = _state(vector_db_path=str(db))
+
+    # First run: embed fails → rollback deletes collection
+    with (
+        patch("graphs.ingest_graph.collection_exists", return_value=False),
+        patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("transient")),
+        patch("graphs.ingest_graph.delete_collection"),
+    ):
+        first = build_graph().invoke(base)
+    assert first["status"] == "error"
+
+    # Second run: everything succeeds
+    with (
+        patch("graphs.ingest_graph.collection_exists", return_value=False),
+        patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
+        patch("graphs.ingest_graph.add_documents"),
+    ):
+        second = build_graph().invoke(base)
+    assert second["status"] == "done"
