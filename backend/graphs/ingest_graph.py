@@ -2,9 +2,25 @@
 LangGraph ingestion pipeline.
 
 Graph shape:
-    fetch_transcript → convert_documents → chunk_documents → embed_chunks → store → END
-    Each node writes its output into IngestState; any exception sets status="error"
-    and short-circuits to END via the error edge on every node.
+    idempotency_check_node
+        │ "run"                     │ "skip"
+        ▼                           ▼
+    fetch_transcript_node          END
+        │ ok / error
+        ▼
+    chunk_node
+        │ ok / error
+        ▼
+    embed_node
+        │ ok / error
+        ▼
+    store_node
+        │
+        ▼
+       END
+
+Each node returns only the keys it owns.  On any exception the node sets
+status="error" and error=<message>; the router then sends execution to END.
 
 State contract
 ──────────────
@@ -17,10 +33,10 @@ error            str | None                exception message if status == "error
 
 Allowed status transitions
 ──────────────────────────
-  pending → running  (on graph entry)
-  running → done     (on successful store)
-  running → error    (on any node exception)
-  pending → skipped  (collection already exists and force=False)
+  pending → skipped  idempotency_check_node (collection exists, force=False)
+  pending → running  idempotency_check_node (needs ingestion)
+  running → done     store_node (success)
+  running → error    any node (exception)
 """
 
 from __future__ import annotations
@@ -35,7 +51,11 @@ from langchain_core.embeddings import Embeddings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.transcript_service import TranscriptSegment  # noqa: E402
+from src.chunker import chunk_documents as _chunk_documents  # noqa: E402
+from src.document_converter import segments_to_documents  # noqa: E402
+from src.embeddings import embed_chunks  # noqa: E402
+from src.transcript_service import TranscriptSegment, fetch_transcript  # noqa: E402
+from src.vector_store import add_documents, collection_exists  # noqa: E402
 
 logger = structlog.get_logger(__name__)
 
@@ -91,3 +111,132 @@ class IngestState(TypedDict):
 
     error: str | None
     """Human-readable error message when status == 'error', else None."""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _error(message: str) -> dict:
+    """Shorthand for the error terminal state."""
+    return {"status": "error", "error": message}
+
+
+# ---------------------------------------------------------------------------
+# Nodes  (pure functions: IngestState → dict)
+# ---------------------------------------------------------------------------
+
+
+def idempotency_check_node(state: IngestState) -> dict:
+    """Skip ingestion if the collection already exists and force is False.
+
+    Returns:
+        status="skipped"  — collection present, force=False
+        status="running"  — needs ingestion (collection absent OR force=True)
+    """
+    try:
+        exists = collection_exists(state["video_id"], state["vector_db_path"])
+    except Exception as exc:  # storage unavailable
+        logger.error("idempotency check failed", video_id=state["video_id"], error=str(exc))
+        return _error(f"idempotency check failed: {exc}")
+
+    if exists and not state["force"]:
+        logger.info("collection exists — skipping", video_id=state["video_id"])
+        return {"status": "skipped"}
+
+    logger.info("starting ingestion", video_id=state["video_id"], force=state["force"])
+    return {"status": "running"}
+
+
+def fetch_transcript_node(state: IngestState) -> dict:
+    """Fetch raw transcript segments for the video.
+
+    Owns: segments
+    """
+    try:
+        segments = fetch_transcript(state["video_id"])
+    except Exception as exc:
+        logger.error("transcript fetch failed", video_id=state["video_id"], error=str(exc))
+        return _error(str(exc))
+
+    logger.info("transcript fetched", video_id=state["video_id"], segments=len(segments))
+    return {"segments": segments}
+
+
+def chunk_node(state: IngestState) -> dict:
+    """Convert segments → Documents, then chunk with timestamp preservation.
+
+    Owns: chunks
+    """
+    try:
+        docs = segments_to_documents(state["video_id"], state["segments"])
+        chunks = _chunk_documents(docs)
+    except Exception as exc:
+        logger.error("chunking failed", video_id=state["video_id"], error=str(exc))
+        return _error(str(exc))
+
+    logger.info("chunks produced", video_id=state["video_id"], chunks=len(chunks))
+    return {"chunks": chunks}
+
+
+def embed_node(state: IngestState) -> dict:
+    """Embed each chunk; return (Document, vector) pairs.
+
+    Owns: embedded_chunks
+    """
+    try:
+        pairs = embed_chunks(state["chunks"], state["embeddings"])
+    except Exception as exc:
+        logger.error("embedding failed", video_id=state["video_id"], error=str(exc))
+        return _error(str(exc))
+
+    logger.info("chunks embedded", video_id=state["video_id"], count=len(pairs))
+    return {"embedded_chunks": pairs}
+
+
+def store_node(state: IngestState) -> dict:
+    """Persist chunks into the vector store.
+
+    Uses the plain chunk list (not embedded_chunks) because add_documents
+    re-embeds internally via the Chroma integration — the embedded_chunks
+    field is available for downstream consumers (e.g. returning vectors to
+    the caller) but Chroma manages its own index.
+
+    Owns: status (→ "done")
+    """
+    try:
+        add_documents(
+            state["video_id"],
+            state["chunks"],
+            state["embeddings"],
+            state["vector_db_path"],
+        )
+    except Exception as exc:
+        logger.error("store failed", video_id=state["video_id"], error=str(exc))
+        return _error(str(exc))
+
+    logger.info(
+        "ingestion done",
+        video_id=state["video_id"],
+        chunks=len(state["chunks"]),
+    )
+    return {"status": "done", "error": None}
+
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
+
+
+def route_on_status(state: IngestState) -> str:
+    """Used as a conditional edge after every node.
+
+    Returns the name of the next node, or END on terminal status.
+    """
+    status = state["status"]
+    if status in ("error", "skipped", "done"):
+        from langgraph.graph import END  # local import avoids circular at module level
+
+        return END
+    return "_continue"

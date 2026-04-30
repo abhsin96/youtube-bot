@@ -1,0 +1,207 @@
+from unittest.mock import MagicMock, patch
+
+import pytest
+from langchain_core.documents import Document
+
+from graphs.ingest_graph import (
+    IngestState,
+    chunk_node,
+    embed_node,
+    fetch_transcript_node,
+    idempotency_check_node,
+    route_on_status,
+    store_node,
+)
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+_SEGMENTS = [
+    {"text": "Hello world", "start": 0.0, "duration": 2.0},
+    {"text": "Second segment", "start": 2.0, "duration": 3.0},
+]
+
+_CHUNKS = [
+    Document(
+        page_content="Hello world",
+        metadata={"video_id": "v1", "start_ts": 0.0, "end_ts": 2.0, "chunk_id": "c1"},
+    )
+]
+
+
+def _fake_embeddings(dim: int = 4):
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda texts: [[0.0] * dim for _ in texts]
+    emb.embed_query.return_value = [0.0] * dim
+    return emb
+
+
+def _state(**overrides) -> IngestState:
+    base: IngestState = {
+        "video_id": "vid1",
+        "force": False,
+        "embeddings": _fake_embeddings(),
+        "vector_db_path": "/tmp/db",
+        "segments": [],
+        "chunks": [],
+        "embedded_chunks": [],
+        "status": "pending",
+        "error": None,
+    }
+    base.update(overrides)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# idempotency_check_node
+# ---------------------------------------------------------------------------
+
+
+def test_idempotency_skips_when_exists():
+    with patch("graphs.ingest_graph.collection_exists", return_value=True):
+        result = idempotency_check_node(_state(force=False))
+    assert result["status"] == "skipped"
+
+
+def test_idempotency_runs_when_not_exists():
+    with patch("graphs.ingest_graph.collection_exists", return_value=False):
+        result = idempotency_check_node(_state(force=False))
+    assert result["status"] == "running"
+
+
+def test_idempotency_force_runs_even_when_exists():
+    with patch("graphs.ingest_graph.collection_exists", return_value=True):
+        result = idempotency_check_node(_state(force=True))
+    assert result["status"] == "running"
+
+
+def test_idempotency_error_on_storage_failure():
+    with patch("graphs.ingest_graph.collection_exists", side_effect=OSError("disk full")):
+        result = idempotency_check_node(_state())
+    assert result["status"] == "error"
+    assert "disk full" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# fetch_transcript_node
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_transcript_sets_segments():
+    with patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS):
+        result = fetch_transcript_node(_state())
+    assert result["segments"] == _SEGMENTS
+
+
+def test_fetch_transcript_error_on_failure():
+    with patch("graphs.ingest_graph.fetch_transcript", side_effect=RuntimeError("no transcript")):
+        result = fetch_transcript_node(_state())
+    assert result["status"] == "error"
+    assert "no transcript" in result["error"]
+
+
+def test_fetch_transcript_does_not_set_status_on_success():
+    with patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS):
+        result = fetch_transcript_node(_state())
+    assert "status" not in result
+
+
+# ---------------------------------------------------------------------------
+# chunk_node
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_node_produces_chunks():
+    with (
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+    ):
+        result = chunk_node(_state(segments=_SEGMENTS))
+    assert result["chunks"] == _CHUNKS
+
+
+def test_chunk_node_error_on_failure():
+    with patch("graphs.ingest_graph.segments_to_documents", side_effect=ValueError("bad")):
+        result = chunk_node(_state(segments=_SEGMENTS))
+    assert result["status"] == "error"
+
+
+def test_chunk_node_does_not_set_status_on_success():
+    with (
+        patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
+        patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
+    ):
+        result = chunk_node(_state(segments=_SEGMENTS))
+    assert "status" not in result
+
+
+# ---------------------------------------------------------------------------
+# embed_node
+# ---------------------------------------------------------------------------
+
+
+def test_embed_node_returns_pairs():
+    pairs = [(_CHUNKS[0], [0.1, 0.2, 0.3, 0.4])]
+    with patch("graphs.ingest_graph.embed_chunks", return_value=pairs):
+        result = embed_node(_state(chunks=_CHUNKS))
+    assert result["embedded_chunks"] == pairs
+
+
+def test_embed_node_error_on_failure():
+    with patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("rate limit")):
+        result = embed_node(_state(chunks=_CHUNKS))
+    assert result["status"] == "error"
+    assert "rate limit" in result["error"]
+
+
+def test_embed_node_does_not_set_status_on_success():
+    with patch("graphs.ingest_graph.embed_chunks", return_value=[]):
+        result = embed_node(_state(chunks=[]))
+    assert "status" not in result
+
+
+# ---------------------------------------------------------------------------
+# store_node
+# ---------------------------------------------------------------------------
+
+
+def test_store_node_sets_status_done():
+    with patch("graphs.ingest_graph.add_documents"):
+        result = store_node(_state(chunks=_CHUNKS))
+    assert result["status"] == "done"
+    assert result["error"] is None
+
+
+def test_store_node_calls_add_documents():
+    with patch("graphs.ingest_graph.add_documents") as mock_add:
+        emb = _fake_embeddings()
+        store_node(_state(chunks=_CHUNKS, embeddings=emb, vector_db_path="/db"))
+    mock_add.assert_called_once_with("vid1", _CHUNKS, emb, "/db")
+
+
+def test_store_node_error_on_failure():
+    with patch("graphs.ingest_graph.add_documents", side_effect=RuntimeError("chroma down")):
+        result = store_node(_state(chunks=_CHUNKS))
+    assert result["status"] == "error"
+    assert "chroma down" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# route_on_status
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["error", "skipped", "done"])
+def test_route_returns_end_on_terminal(status):
+    from langgraph.graph import END
+
+    assert route_on_status(_state(status=status)) == END
+
+
+def test_route_returns_continue_on_running():
+    assert route_on_status(_state(status="running")) == "_continue"
+
+
+def test_route_returns_continue_on_pending():
+    assert route_on_status(_state(status="pending")) == "_continue"
