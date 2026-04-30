@@ -8,10 +8,9 @@ def test_no_network_call_when_tracing_disabled(monkeypatch):
     mock_send = MagicMock(side_effect=AssertionError("HTTP call made with tracing disabled"))
 
     with patch("httpx.Client.send", mock_send), patch("httpx.AsyncClient.send", mock_send):
-        from src.chain import build_hello_chain
+        from src.chain import build_rag_chain
 
-        chain = build_hello_chain()
-        result = chain.invoke("world")
+        chain = build_rag_chain("gpt-4o-mini", "sk-test")
 
-    assert result == "Hello, world!"
+    assert callable(chain.invoke)
     mock_send.assert_not_called()

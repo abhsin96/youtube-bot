@@ -4,6 +4,7 @@ import structlog
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
+from langsmith import traceable
 from openai import APIConnectionError, RateLimitError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -52,6 +53,7 @@ def _call_embed(embeddings: Embeddings, texts: list[str]) -> list[list[float]]:
     return embeddings.embed_documents(texts)
 
 
+@traceable(name="embed_chunks")
 def embed_chunks(
     chunks: list[Document],
     embeddings: Embeddings,
