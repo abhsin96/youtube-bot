@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     vector_db_path: Path = Path("chroma_db")
     min_similarity_threshold: float = 0.25
     max_history_turns: int = 10
+    context_budget_tokens: int = 6000
 
     # --- server ---
     version: str = "0.1.0"

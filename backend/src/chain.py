@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
 from src.retriever import build_retriever
+from src.tokens import count_tokens
 
 logger = structlog.get_logger(__name__)
 
@@ -49,6 +50,54 @@ def _format_context(docs: list[Document]) -> str:
         ts = _seconds_to_mmss(raw_ts) if isinstance(raw_ts, (int, float)) else "[??:??]"
         parts.append(f"{ts} {doc.page_content}")
     return "\n\n".join(parts)
+
+
+def _count_prompt_tokens(
+    sources: list[Document],
+    system: str,
+    history: list[BaseMessage],
+    question: str,
+    model: str,
+) -> int:
+    """Estimate total prompt tokens across all four sections."""
+    history_text = "\n".join(str(m.content) for m in history)
+    return (
+        count_tokens(system, model)
+        + count_tokens(history_text, model)
+        + count_tokens(_format_context(sources), model)
+        + count_tokens(question, model)
+    )
+
+
+def _trim_to_budget(
+    sources: list[Document],
+    system: str,
+    history: list[BaseMessage],
+    question: str,
+    model: str,
+    budget: int,
+) -> list[Document]:
+    """Drop lowest-score chunks (tail of the sorted list) until the prompt fits budget.
+
+    *sources* must already be sorted highest-relevance-first (as VideoRetriever returns).
+    Drops one chunk at a time from the end so high-score evidence is preserved.
+    """
+    trimmed = list(sources)
+    while trimmed and _count_prompt_tokens(trimmed, system, history, question, model) > budget:
+        dropped = trimmed.pop()
+        logger.debug(
+            "context budget: dropped chunk",
+            chunk_id=dropped.metadata.get("chunk_id"),
+            remaining=len(trimmed),
+        )
+    if len(trimmed) < len(sources):
+        logger.info(
+            "context budget enforced",
+            original=len(sources),
+            kept=len(trimmed),
+            budget=budget,
+        )
+    return trimmed
 
 
 def build_chat_prompt() -> ChatPromptTemplate:
@@ -91,6 +140,7 @@ def answer_question(
     k: int = 5,
     score_threshold: float = 0.0,
     history: list[BaseMessage] | None = None,
+    context_budget_tokens: int = 6000,
 ) -> RAGResult:
     """Retrieve relevant chunks then call the LLM; return answer + sources."""
     retriever = build_retriever(
@@ -105,13 +155,26 @@ def answer_question(
             sources=[],
         )
 
+    resolved_history = history or []
+    system = _load_system_prompt()
+    sources = _trim_to_budget(
+        sources, system, resolved_history, question, chat_model, context_budget_tokens
+    )
+
+    if not sources:
+        logger.info("all chunks trimmed by budget", video_id=video_id)
+        return RAGResult(
+            answer="I'm sorry, that information isn't available in the video transcript.",
+            sources=[],
+        )
+
     context = _format_context(sources)
     chain = build_rag_chain(chat_model, openai_api_key)
     answer = chain.invoke(
         {
             "context": context,
             "question": question,
-            "history": history or [],
+            "history": resolved_history,
         }
     )
 

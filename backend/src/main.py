@@ -147,6 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             openai_api_key=s.openai_api_key,
             k=body.k,
             score_threshold=s.min_similarity_threshold,
+            context_budget_tokens=s.context_budget_tokens,
         )
         return QuestionResponse(
             answer=result.answer,
