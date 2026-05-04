@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import structlog
 from langchain_core.documents import Document
@@ -11,16 +12,18 @@ from src.retriever import build_retriever
 
 logger = structlog.get_logger(__name__)
 
-_SYSTEM = """You are a helpful assistant that answers questions about a YouTube video \
-based solely on the transcript excerpts provided below.
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-Rules:
-- Answer only from the provided excerpts. Do not use outside knowledge.
-- If the excerpts do not contain enough information, say so clearly.
-- Be concise. Cite timestamps (start_ts) when relevant.
 
-Transcript excerpts:
-{context}"""
+def _load_system_prompt() -> str:
+    return (_PROMPTS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
+
+
+def _seconds_to_mmss(seconds: float) -> str:
+    """Convert a float seconds value to [mm:ss] notation."""
+    total = int(seconds)
+    return f"[{total // 60:02d}:{total % 60:02d}]"
+
 
 _HUMAN = "{question}"
 
@@ -34,15 +37,17 @@ class RAGResult:
 def _format_context(docs: list[Document]) -> str:
     parts = []
     for doc in docs:
-        ts = doc.metadata.get("start_ts", "?")
-        parts.append(f"[{ts}s] {doc.page_content}")
+        raw_ts = doc.metadata.get("start_ts")
+        ts = _seconds_to_mmss(raw_ts) if isinstance(raw_ts, (int, float)) else "[??:??]"
+        parts.append(f"{ts} {doc.page_content}")
     return "\n\n".join(parts)
 
 
 def build_rag_chain(chat_model: str, openai_api_key: str):
     """Return an LCEL chain: question str → answer str (stateless)."""
     llm = ChatOpenAI(model=chat_model, openai_api_key=openai_api_key)
-    prompt = ChatPromptTemplate.from_messages([("system", _SYSTEM), ("human", _HUMAN)])
+    system = _load_system_prompt()
+    prompt = ChatPromptTemplate.from_messages([("system", system), ("human", _HUMAN)])
     return prompt | llm | StrOutputParser()
 
 
@@ -65,7 +70,7 @@ def answer_question(
     if not sources:
         logger.info("no sources found", video_id=video_id, question=question)
         return RAGResult(
-            answer="I couldn't find relevant information in the video transcript.",
+            answer="I'm sorry, that information isn't available in the video transcript.",
             sources=[],
         )
 
@@ -73,9 +78,5 @@ def answer_question(
     chain = build_rag_chain(chat_model, openai_api_key)
     answer = chain.invoke({"context": context, "question": question})
 
-    logger.info(
-        "question answered",
-        video_id=video_id,
-        sources=len(sources),
-    )
+    logger.info("question answered", video_id=video_id, sources=len(sources))
     return RAGResult(answer=answer, sources=sources)

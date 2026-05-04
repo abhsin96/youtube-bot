@@ -3,7 +3,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.documents import Document
 
-from src.chain import RAGResult, _format_context, answer_question, build_rag_chain
+from src.chain import (
+    RAGResult,
+    _format_context,
+    _seconds_to_mmss,
+    answer_question,
+    build_rag_chain,
+)
 
 _DIM = 4
 _VIDEO_ID = "vid1"
@@ -31,6 +37,33 @@ def _mock_retriever(docs: list[Document]):
     return r
 
 
+# --- _seconds_to_mmss ---
+
+
+def test_seconds_to_mmss_whole_minutes():
+    assert _seconds_to_mmss(60.0) == "[01:00]"
+
+
+def test_seconds_to_mmss_zero():
+    assert _seconds_to_mmss(0.0) == "[00:00]"
+
+
+def test_seconds_to_mmss_sub_minute():
+    assert _seconds_to_mmss(42.0) == "[00:42]"
+
+
+def test_seconds_to_mmss_mixed():
+    assert _seconds_to_mmss(83.9) == "[01:23]"
+
+
+def test_seconds_to_mmss_large():
+    assert _seconds_to_mmss(3723.0) == "[62:03]"
+
+
+def test_seconds_to_mmss_int_input():
+    assert _seconds_to_mmss(125) == "[02:05]"
+
+
 # --- _format_context ---
 
 
@@ -40,10 +73,24 @@ def test_format_context_includes_text():
     assert "hello world" in ctx
 
 
-def test_format_context_includes_timestamp():
+def test_format_context_timestamp_is_mmss():
+    docs = [_doc("hello", start_ts=83.0)]
+    ctx = _format_context(docs)
+    assert "[01:23]" in ctx
+
+
+def test_format_context_timestamp_not_raw_seconds():
     docs = [_doc("hello", start_ts=42.0)]
     ctx = _format_context(docs)
-    assert "42.0" in ctx
+    # Raw float (e.g. "42.0s") must not appear — only [mm:ss]
+    assert "42.0" not in ctx
+    assert "[00:42]" in ctx
+
+
+def test_format_context_missing_timestamp_uses_placeholder():
+    doc = Document(page_content="no ts", metadata={})
+    ctx = _format_context([doc])
+    assert "[??:??]" in ctx
 
 
 def test_format_context_multiple_docs_separated():
@@ -98,7 +145,7 @@ def test_answer_question_no_sources_returns_fallback(tmp_db):
         result = answer_question(
             _VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test"
         )
-    assert "couldn't find" in result.answer.lower()
+    assert "isn't available" in result.answer.lower()
     assert result.sources == []
 
 
@@ -174,4 +221,4 @@ def test_answer_question_threshold_filters_propagate(tmp_db):
             score_threshold=0.9,
         )
     assert result.sources == []
-    assert "couldn't find" in result.answer.lower()
+    assert "isn't available" in result.answer.lower()
