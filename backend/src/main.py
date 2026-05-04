@@ -4,24 +4,37 @@ import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from langsmith import traceable
+from pydantic import BaseModel, Field
 
+from graphs.ingest_graph import IngestState, build_graph
 from src.chain import answer_question
 from src.config import Settings, load_settings
 from src.embeddings import get_embeddings
-from src.ingestion import ingest_video
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
-from src.transcript_service import ErrorCode, TranscriptError
 
 logger = structlog.get_logger(__name__)
 
-_TRANSCRIPT_ERROR_STATUS: dict[ErrorCode, int] = {
-    ErrorCode.VIDEO_NOT_FOUND: 404,
-    ErrorCode.TRANSCRIPT_DISABLED: 422,
-    ErrorCode.RATE_LIMITED: 429,
-    ErrorCode.UNKNOWN: 502,
-}
+
+@traceable(name="ingest_video")
+def _run_ingest_graph(
+    initial_state: IngestState,
+    *,
+    video_id: str,
+    embed_model: str,
+) -> dict:
+    """Run the ingestion graph; expose video_id, embed_model, chunk_count to LangSmith."""
+    result = build_graph().invoke(initial_state)
+    return {
+        "status": result["status"],
+        "chunk_count": len(result["chunks"]),
+        "video_id": video_id,
+        "embed_model": embed_model,
+        "error": result["error"],
+        # keep full result accessible to the caller via a side-channel key
+        "_result": result,
+    }
 
 
 @asynccontextmanager
@@ -35,11 +48,15 @@ async def lifespan(app: FastAPI):
 # --- request / response models ---
 
 
+class IngestRequest(BaseModel):
+    video_id: str = Field(..., min_length=1, description="YouTube video ID")
+    force: bool = Field(False, description="Re-ingest even if collection already exists")
+
+
 class IngestResponse(BaseModel):
-    video_id: str
-    segments: int
-    chunks: int
-    already_existed: bool
+    status: str
+    chunk_count: int
+    cached: bool
 
 
 class QuestionRequest(BaseModel):
@@ -85,22 +102,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "has_api_key": bool(s.openai_api_key),
         }
 
-    @app.post("/ingest/{video_id}", response_model=IngestResponse)
-    async def ingest(video_id: str, force: bool = False):
+    @app.post("/ingest", response_model=IngestResponse)
+    async def ingest(body: IngestRequest):
         s: Settings = app.state.settings
         embeddings = get_embeddings(s)
-        try:
-            result = ingest_video(video_id, embeddings, s.vector_db_path, force=force)
-        except TranscriptError as exc:
-            raise HTTPException(
-                status_code=_TRANSCRIPT_ERROR_STATUS.get(exc.code, 502),
-                detail=str(exc),
-            ) from exc
+
+        initial_state: IngestState = {
+            "video_id": body.video_id,
+            "force": body.force,
+            "embeddings": embeddings,
+            "vector_db_path": s.vector_db_path,
+            "segments": [],
+            "chunks": [],
+            "embedded_chunks": [],
+            "status": "pending",
+            "error": None,
+        }
+
+        traced = _run_ingest_graph(
+            initial_state,
+            video_id=body.video_id,
+            embed_model=s.embed_model,
+        )
+
+        if traced["status"] == "error":
+            raise HTTPException(status_code=502, detail=traced["error"])
+
         return IngestResponse(
-            video_id=result.video_id,
-            segments=result.segments,
-            chunks=result.chunks,
-            already_existed=result.already_existed,
+            status=traced["status"],
+            chunk_count=traced["chunk_count"],
+            cached=traced["status"] == "skipped",
         )
 
     @app.post("/chat/{video_id}", response_model=QuestionResponse)
