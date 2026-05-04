@@ -24,3 +24,6 @@ chroma_db/
 
 *.log
 
+node_modules/
+.claude/
+
