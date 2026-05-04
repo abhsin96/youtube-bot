@@ -146,6 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chat_model=s.chat_model,
             openai_api_key=s.openai_api_key,
             k=body.k,
+            score_threshold=s.min_similarity_threshold,
         )
         return QuestionResponse(
             answer=result.answer,

@@ -7,7 +7,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from src.vector_store import query
+from src.retriever import build_retriever
 
 logger = structlog.get_logger(__name__)
 
@@ -54,10 +54,13 @@ def answer_question(
     chat_model: str,
     openai_api_key: str,
     k: int = 5,
+    score_threshold: float = 0.0,
 ) -> RAGResult:
     """Retrieve relevant chunks then call the LLM; return answer + sources."""
-    query_vec = embeddings.embed_query(question)
-    sources = query(video_id, query_vec, embeddings, vector_db_path, k=k)
+    retriever = build_retriever(
+        video_id, embeddings, vector_db_path, k=k, score_threshold=score_threshold
+    )
+    sources = retriever.invoke(question)
 
     if not sources:
         logger.info("no sources found", video_id=video_id, question=question)
