@@ -72,7 +72,12 @@ def build_chat_prompt() -> ChatPromptTemplate:
 
 def build_rag_chain(chat_model: str, openai_api_key: str):
     """Return an LCEL chain: {context, question, history} → answer str."""
-    llm = ChatOpenAI(model=chat_model, openai_api_key=openai_api_key)
+    llm = ChatOpenAI(
+        model=chat_model,
+        openai_api_key=openai_api_key,
+        temperature=0.2,
+        streaming=True,
+    )
     return build_chat_prompt() | llm | StrOutputParser()
 
 

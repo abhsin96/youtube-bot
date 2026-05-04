@@ -229,6 +229,30 @@ def test_build_rag_chain_returns_callable():
     assert callable(chain.invoke)
 
 
+def test_build_rag_chain_uses_temperature_0_2():
+    with patch("src.chain.ChatOpenAI") as mock_cls:
+        build_rag_chain("gpt-4o-mini", "sk-test")
+    assert mock_cls.call_args.kwargs["temperature"] == 0.2
+
+
+def test_build_rag_chain_streaming_enabled():
+    with patch("src.chain.ChatOpenAI") as mock_cls:
+        build_rag_chain("gpt-4o-mini", "sk-test")
+    assert mock_cls.call_args.kwargs["streaming"] is True
+
+
+def test_build_rag_chain_passes_chat_model():
+    with patch("src.chain.ChatOpenAI") as mock_cls:
+        build_rag_chain("gpt-4o-turbo", "sk-test")
+    assert mock_cls.call_args.kwargs["model"] == "gpt-4o-turbo"
+
+
+def test_build_rag_chain_passes_api_key():
+    with patch("src.chain.ChatOpenAI") as mock_cls:
+        build_rag_chain("gpt-4o-mini", "sk-mykey")
+    assert mock_cls.call_args.kwargs["openai_api_key"] == "sk-mykey"
+
+
 # --- answer_question ---
 
 
