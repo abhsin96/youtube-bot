@@ -56,6 +56,10 @@ class VideoRetriever(BaseRetriever):
             query, k=self.k
         )
 
+        # Sort highest relevance first so callers get a stable, predictable order
+        # regardless of the underlying store's iteration order.
+        pairs.sort(key=lambda p: p[1], reverse=True)
+
         docs = [doc for doc, score in pairs if score >= self.score_threshold]
 
         logger.info(
