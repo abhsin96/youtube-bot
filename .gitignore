@@ -26,4 +26,5 @@ chroma_db/
 
 node_modules/
 .claude/
+dist/
 
