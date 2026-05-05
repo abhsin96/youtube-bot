@@ -369,6 +369,35 @@ class TestAskStreamEndpoint:
         assert len(done["citations"]) == 1
         assert done["citations"][0]["chunk_id"] == "cX"
 
+    @patch("src.main.collection_exists", return_value=True)
+    @patch("src.main.build_retriever")
+    @patch("src.main.get_embeddings")
+    def test_llm_exception_emits_error_sse_event(self, _mock_emb, mock_br, _mock_ce, client):
+        """LLM failure inside event_stream emits an error SSE event instead of crashing."""
+        from langchain_core.documents import Document
+        from langchain_openai import ChatOpenAI
+
+        doc = Document(
+            page_content="transcript text",
+            metadata={"chunk_id": "c1", "start_ts": 1.0, "end_ts": 5.0},
+        )
+        mock_retriever = MagicMock()
+        mock_retriever.invoke.return_value = [doc]
+        mock_br.return_value = mock_retriever
+
+        async def raising_astream(self_llm, messages, stop=None, run_manager=None, **kwargs):
+            raise RuntimeError("openai network error")
+            yield  # pragma: no cover — makes this an async generator
+
+        with patch.object(ChatOpenAI, "_astream", raising_astream):
+            resp = client.post("/ask/stream", json={"video_id": "vid1", "question": "q?"})
+
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert len(error_events) == 1
+        assert error_events[0]["code"] == "INTERNAL_ERROR"
+
 
 # ---------------------------------------------------------------------------
 # Helpers

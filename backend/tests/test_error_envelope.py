@@ -120,6 +120,68 @@ class TestErrorEnvelopeShape:
 
 
 # ---------------------------------------------------------------------------
+# Global exception handler — unhandled exceptions never reach the client raw
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalExceptionHandler:
+    def test_unhandled_exception_returns_500_envelope(self, settings):
+        app = create_app(settings)
+
+        @app.get("/test-boom")
+        async def boom():
+            raise RuntimeError("totally unexpected")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/test-boom")
+
+        assert resp.status_code == 500
+        err = _assert_envelope(resp.json())
+        assert err["code"] == "INTERNAL_ERROR"
+
+    def test_unhandled_exception_message_is_generic(self, settings):
+        """Internal exception detail must not leak into the response body."""
+        app = create_app(settings)
+        secret_detail = "db-password-in-error-xyz"
+
+        @app.get("/test-secret")
+        async def secret_boom():
+            raise RuntimeError(secret_detail)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/test-secret")
+
+        assert secret_detail not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# /chat endpoint — answer_question() exceptions produce 500 envelope
+# ---------------------------------------------------------------------------
+
+
+class TestChatEndpointErrors:
+    @patch("src.main.get_embeddings")
+    @patch("src.main.answer_question")
+    def test_answer_question_exception_returns_500_envelope(self, mock_aq, _mock_emb, client):
+        mock_aq.side_effect = RuntimeError("embedding store down")
+        resp = client.post("/chat/vid1", json={"question": "q?"})
+
+        assert resp.status_code == 500
+        err = _assert_envelope(resp.json())
+        assert err["code"] == "INTERNAL_ERROR"
+
+    @patch("src.main.get_embeddings")
+    @patch("src.main.answer_question")
+    def test_answer_question_exception_message_is_generic(self, mock_aq, _mock_emb, client):
+        """Internal detail from answer_question must not appear in the response."""
+        secret = "connection-string-secret-789"
+        mock_aq.side_effect = RuntimeError(secret)
+        resp = client.post("/chat/vid1", json={"question": "q?"})
+
+        assert secret not in resp.text
+
+
+# ---------------------------------------------------------------------------
 # CORS — chrome-extension origin
 # ---------------------------------------------------------------------------
 

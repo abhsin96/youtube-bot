@@ -4,15 +4,20 @@ Every error response has the shape::
 
     {"error": {"code": "<SCREAMING_SNAKE>", "message": "<human string>"}}
 
-Register the three handlers in create_app so FastAPI/Starlette errors are also
-wrapped automatically.
+Register the four handlers in create_app so FastAPI/Starlette errors are also
+wrapped automatically.  The global_exception_handler is the last-resort
+fallback: it catches any unhandled Exception, logs the full traceback
+server-side, and returns a generic 500 so internal details never reach clients.
 """
 
 from dataclasses import dataclass
 
+import structlog
 from fastapi import Request
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.responses import JSONResponse
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -55,4 +60,17 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     return JSONResponse(
         status_code=422,
         content=_body("VALIDATION_ERROR", str(exc.errors())),
+    )
+
+
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler: log the full traceback, return a generic 500."""
+    logger.error(
+        "unhandled_exception",
+        path=str(request.url.path),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return JSONResponse(
+        status_code=500,
+        content=_body("INTERNAL_ERROR", "An unexpected error occurred."),
     )

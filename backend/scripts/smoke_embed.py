@@ -58,7 +58,7 @@ def main() -> None:
         client.read_project(project_name=settings.langsmith_project)
     except Exception:
         print(f"  Project '{settings.langsmith_project}' not found — trace may still be flushing.")
-        print(f"  Check https://smith.langchain.com manually.")
+        print("  Check https://smith.langchain.com manually.")
         sys.exit(1)
 
     runs = list(
@@ -75,7 +75,7 @@ def main() -> None:
         sys.exit(1)
 
     latest = runs[0]
-    print(f"\nTrace confirmed:")
+    print("\nTrace confirmed:")
     print(f"  run_name : {latest.name}")
     print(f"  run_id   : {latest.id}")
     print(f"  status   : {latest.status}")

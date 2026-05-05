@@ -423,3 +423,83 @@ class TestGuardrailScoreBased:
 
         assert result["max_retrieval_score"] is None
         assert result["refused"] is True
+
+
+# ---------------------------------------------------------------------------
+# Error end-states — node-level exception handling
+# ---------------------------------------------------------------------------
+
+
+class TestErrorNodes:
+    @patch("graphs.ask_graph.collection_exists", return_value=True)
+    @patch("graphs.ask_graph.build_retriever")
+    @patch("graphs.ask_graph.ChatOpenAI")
+    def test_retrieve_exception_sets_error_in_state(
+        self, MockLLM, mock_br, _mock_ce, settings, embeddings
+    ):
+        """retrieve_node wraps exceptions in state.error; generate never runs."""
+        mock_retriever = MagicMock()
+        mock_retriever.invoke.side_effect = RuntimeError("chroma unavailable")
+        mock_br.return_value = mock_retriever
+
+        graph = build_ask_graph(settings, embeddings)
+        result = graph.invoke(make_initial_state("vid1", "q?"))
+
+        assert result["error"] == "chroma unavailable"
+        MockLLM.return_value.invoke.assert_not_called()
+
+    @patch("graphs.ask_graph.collection_exists", return_value=True)
+    @patch("graphs.ask_graph.build_retriever")
+    @patch("graphs.ask_graph.ChatOpenAI")
+    def test_generate_exception_sets_error_in_state(
+        self, MockLLM, mock_br, _mock_ce, settings, embeddings
+    ):
+        """generate_node wraps exceptions in state.error; format_response never runs."""
+        doc = _doc()
+        doc.metadata["_score"] = 0.9
+        mock_retriever = MagicMock()
+        mock_retriever.invoke.return_value = [doc]
+        mock_br.return_value = mock_retriever
+        MockLLM.return_value.invoke.side_effect = RuntimeError("openai timeout")
+
+        graph = build_ask_graph(settings, embeddings)
+        result = graph.invoke(make_initial_state("vid1", "q?"))
+
+        assert result["error"] == "openai timeout"
+
+    @patch("graphs.ask_graph.collection_exists", return_value=True)
+    @patch("graphs.ask_graph.build_retriever")
+    @patch("graphs.ask_graph.ChatOpenAI")
+    def test_retrieve_error_leaves_citations_empty(
+        self, MockLLM, mock_br, _mock_ce, settings, embeddings
+    ):
+        """When retrieve fails, citations remain at their zero value (not populated)."""
+        mock_retriever = MagicMock()
+        mock_retriever.invoke.side_effect = RuntimeError("connection refused")
+        mock_br.return_value = mock_retriever
+
+        graph = build_ask_graph(settings, embeddings)
+        result = graph.invoke(make_initial_state("vid1", "q?"))
+
+        assert result["citations"] == []
+        assert result["error"] == "connection refused"
+
+    @patch("graphs.ask_graph.collection_exists", return_value=True)
+    @patch("graphs.ask_graph.build_retriever")
+    @patch("graphs.ask_graph.ChatOpenAI")
+    def test_generate_error_leaves_citations_empty(
+        self, MockLLM, mock_br, _mock_ce, settings, embeddings
+    ):
+        """When generate fails, citations remain at their zero value."""
+        doc = _doc()
+        doc.metadata["_score"] = 0.9
+        mock_retriever = MagicMock()
+        mock_retriever.invoke.return_value = [doc]
+        mock_br.return_value = mock_retriever
+        MockLLM.return_value.invoke.side_effect = RuntimeError("rate limit")
+
+        graph = build_ask_graph(settings, embeddings)
+        result = graph.invoke(make_initial_state("vid1", "q?"))
+
+        assert result["citations"] == []
+        assert result["error"] == "rate limit"

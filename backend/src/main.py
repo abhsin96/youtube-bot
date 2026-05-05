@@ -35,6 +35,7 @@ from src.embeddings import get_embeddings
 from src.error_envelope import (
     AppError,
     app_error_handler,
+    global_exception_handler,
     http_exception_handler,
     validation_error_handler,
 )
@@ -193,6 +194,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
+    # Last-resort fallback: any unhandled Exception → generic 500 envelope.
+    app.add_exception_handler(Exception, global_exception_handler)
 
     # RequestIDMiddleware must be outermost so request_id is bound before CORS
     app.add_middleware(RequestIDMiddleware)
@@ -270,17 +273,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         s: Settings = app.state.settings
         key = _resolve_key(s)
         embeddings = get_embeddings(s, api_key=key)
-        result = answer_question(
-            video_id=video_id,
-            question=body.question,
-            embeddings=embeddings,
-            vector_db_path=s.vector_db_path,
-            chat_model=s.chat_model,
-            openai_api_key=key,
-            k=body.k,
-            score_threshold=s.min_similarity_threshold,
-            context_budget_tokens=s.context_budget_tokens,
-        )
+        try:
+            result = answer_question(
+                video_id=video_id,
+                question=body.question,
+                embeddings=embeddings,
+                vector_db_path=s.vector_db_path,
+                chat_model=s.chat_model,
+                openai_api_key=key,
+                k=body.k,
+                score_threshold=s.min_similarity_threshold,
+                context_budget_tokens=s.context_budget_tokens,
+            )
+        except Exception as exc:
+            logger.exception("chat_error", video_id=video_id)
+            raise AppError(500, "INTERNAL_ERROR", "An unexpected error occurred.") from exc
         return QuestionResponse(
             answer=result.answer,
             sources=[
@@ -361,31 +368,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
 
         async def event_stream():
-            if not trimmed:
-                refusal = "I'm sorry, that information isn't available in the video transcript."
-                yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True})}\n\n"
-                return
+            try:
+                if not trimmed:
+                    refusal = "I'm sorry, that information isn't available in the video transcript."
+                    yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True})}\n\n"
+                    return
 
-            streaming_llm = ChatOpenAI(
-                model=s.chat_model,
-                openai_api_key=key,
-                temperature=0.2,
-                streaming=True,
-            )
-            chain = build_chat_prompt() | streaming_llm | StrOutputParser()
-            full_answer = ""
-            async for token in chain.astream(
-                {
-                    "context": _format_context(trimmed),
-                    "question": body.question,
-                    "history": history,
-                }
-            ):
-                full_answer += token
-                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                streaming_llm = ChatOpenAI(
+                    model=s.chat_model,
+                    openai_api_key=key,
+                    temperature=0.2,
+                    streaming=True,
+                )
+                chain = build_chat_prompt() | streaming_llm | StrOutputParser()
+                full_answer = ""
+                async for token in chain.astream(
+                    {
+                        "context": _format_context(trimmed),
+                        "question": body.question,
+                        "history": history,
+                    }
+                ):
+                    full_answer += token
+                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
-            refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
-            yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused})}\n\n"
+                refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
+                yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused})}\n\n"
+            except Exception:
+                logger.exception("stream_error", video_id=body.video_id)
+                yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

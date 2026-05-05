@@ -6,9 +6,8 @@ Flow:  validate → retrieve → guardrail_check → (refuse | generate) → for
 State travels through every node; nodes return partial dicts that are merged
 into the running AskState by LangGraph.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 import structlog
 from langchain_core.documents import Document
@@ -34,13 +33,13 @@ class AskState(TypedDict):
     k: int
     # ── Intermediate ────────────────────────────────────────────────────────
     retrieved_chunks: list[Document]
-    max_retrieval_score: Optional[float]  # highest _score among retrieved docs
+    max_retrieval_score: float | None  # highest _score among retrieved docs
     # ── Outputs ─────────────────────────────────────────────────────────────
     refused: bool
     answer: str
     citations: list[dict]  # [{chunk_id, start_ts, end_ts, text}]
-    tokens_used: Optional[int]
-    error: Optional[str]  # VIDEO_NOT_INGESTED or None
+    tokens_used: int | None
+    error: str | None  # VIDEO_NOT_INGESTED or None
 
 
 def make_initial_state(
@@ -105,24 +104,28 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 
     def retrieve_node(state: AskState) -> dict:
         """Fetch the top-k relevant chunks from the vector store."""
-        retriever = build_retriever(
-            state["video_id"],
-            embeddings,
-            vector_db_path,
-            k=state.get("k", 5),
-            score_threshold=score_threshold,
-        )
-        chunks = retriever.invoke(state["question"])
-        max_score: float | None = (
-            max(doc.metadata.get("_score", 0.0) for doc in chunks) if chunks else None
-        )
-        logger.info(
-            "chunks retrieved",
-            video_id=state["video_id"],
-            count=len(chunks),
-            max_score=max_score,
-        )
-        return {"retrieved_chunks": chunks, "max_retrieval_score": max_score}
+        try:
+            retriever = build_retriever(
+                state["video_id"],
+                embeddings,
+                vector_db_path,
+                k=state.get("k", 5),
+                score_threshold=score_threshold,
+            )
+            chunks = retriever.invoke(state["question"])
+            max_score: float | None = (
+                max(doc.metadata.get("_score", 0.0) for doc in chunks) if chunks else None
+            )
+            logger.info(
+                "chunks retrieved",
+                video_id=state["video_id"],
+                count=len(chunks),
+                max_score=max_score,
+            )
+            return {"retrieved_chunks": chunks, "max_retrieval_score": max_score}
+        except Exception as exc:
+            logger.exception("retrieve_node_failed", video_id=state["video_id"])
+            return {"error": str(exc)}
 
     def guardrail_check_node(state: AskState) -> dict:  # noqa: ARG001
         """Routing-only node — no state mutations."""
@@ -135,7 +138,9 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 
             rt = get_current_run_tree()
             if rt is not None:
-                rt.add_metadata({"refused": True, "max_retrieval_score": state.get("max_retrieval_score")})
+                rt.add_metadata(
+                    {"refused": True, "max_retrieval_score": state.get("max_retrieval_score")}
+                )
                 rt.add_tags(["refused"])
                 rt.patch()
         except Exception:
@@ -147,50 +152,54 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 
     def generate_node(state: AskState) -> dict:
         """Trim context to token budget, call the LLM, capture usage metadata."""
-        history = state.get("history") or []
-        system = _load_system_prompt()
-        chunks = _trim_to_budget(
-            state["retrieved_chunks"],
-            system,
-            history,
-            state["question"],
-            chat_model_name,
-            context_budget_tokens,
-        )
+        try:
+            history = state.get("history") or []
+            system = _load_system_prompt()
+            chunks = _trim_to_budget(
+                state["retrieved_chunks"],
+                system,
+                history,
+                state["question"],
+                chat_model_name,
+                context_budget_tokens,
+            )
 
-        if not chunks:
+            if not chunks:
+                return {
+                    "retrieved_chunks": [],
+                    "refused": True,
+                    "answer": "I'm sorry, that information isn't available in the video transcript.",
+                }
+
+            context = _format_context(chunks)
+            prompt_value = prompt_template.invoke(
+                {"context": context, "question": state["question"], "history": history}
+            )
+            ai_message = llm.invoke(prompt_value)
+            answer = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
+
+            # LangChain ≥ 0.2 surfaces token counts on AIMessage.usage_metadata
+            tokens_used: int | None = None
+            usage = getattr(ai_message, "usage_metadata", None)
+            if isinstance(usage, dict):
+                tokens_used = usage.get("total_tokens")
+
+            refused = REFUSAL_SENTINEL.lower() in answer.lower()
+            logger.info(
+                "answer generated",
+                video_id=state["video_id"],
+                refused=refused,
+                tokens=tokens_used,
+            )
             return {
-                "retrieved_chunks": [],
-                "refused": True,
-                "answer": "I'm sorry, that information isn't available in the video transcript.",
+                "answer": answer,
+                "refused": refused,
+                "retrieved_chunks": chunks,  # trimmed — used for citation extraction
+                "tokens_used": tokens_used,
             }
-
-        context = _format_context(chunks)
-        prompt_value = prompt_template.invoke(
-            {"context": context, "question": state["question"], "history": history}
-        )
-        ai_message = llm.invoke(prompt_value)
-        answer = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
-
-        # LangChain ≥ 0.2 surfaces token counts on AIMessage.usage_metadata
-        tokens_used: int | None = None
-        usage = getattr(ai_message, "usage_metadata", None)
-        if isinstance(usage, dict):
-            tokens_used = usage.get("total_tokens")
-
-        refused = REFUSAL_SENTINEL.lower() in answer.lower()
-        logger.info(
-            "answer generated",
-            video_id=state["video_id"],
-            refused=refused,
-            tokens=tokens_used,
-        )
-        return {
-            "answer": answer,
-            "refused": refused,
-            "retrieved_chunks": chunks,  # trimmed — used for citation extraction
-            "tokens_used": tokens_used,
-        }
+        except Exception as exc:
+            logger.exception("generate_node_failed", video_id=state["video_id"])
+            return {"error": str(exc)}
 
     def format_response_node(state: AskState) -> dict:
         """Build citations list from the (post-budget-trim) retrieved chunks."""
@@ -211,6 +220,12 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 
     def route_after_validate(state: AskState) -> str:
         return END if state.get("error") else "retrieve"
+
+    def route_after_retrieve(state: AskState) -> str:
+        return END if state.get("error") else "guardrail_check"
+
+    def route_after_generate(state: AskState) -> str:
+        return END if state.get("error") else "format_response"
 
     def route_after_guardrail(state: AskState) -> str:
         chunks = state.get("retrieved_chunks") or []
@@ -235,14 +250,22 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
         route_after_validate,
         {END: END, "retrieve": "retrieve"},
     )
-    g.add_edge("retrieve", "guardrail_check")
+    g.add_conditional_edges(
+        "retrieve",
+        route_after_retrieve,
+        {END: END, "guardrail_check": "guardrail_check"},
+    )
     g.add_conditional_edges(
         "guardrail_check",
         route_after_guardrail,
         {"refuse": "refuse", "generate": "generate"},
     )
     g.add_edge("refuse", "format_response")
-    g.add_edge("generate", "format_response")
+    g.add_conditional_edges(
+        "generate",
+        route_after_generate,
+        {END: END, "format_response": "format_response"},
+    )
     g.add_edge("format_response", END)
 
     return g.compile()
