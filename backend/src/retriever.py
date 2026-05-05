@@ -60,6 +60,11 @@ class VideoRetriever(BaseRetriever):
         # regardless of the underlying store's iteration order.
         pairs.sort(key=lambda p: p[1], reverse=True)
 
+        # Annotate every candidate with its score so downstream nodes (e.g. the
+        # guardrail) can make explicit score-based decisions.
+        for doc, score in pairs:
+            doc.metadata["_score"] = score
+
         docs = [doc for doc, score in pairs if score >= self.score_threshold]
 
         logger.info(

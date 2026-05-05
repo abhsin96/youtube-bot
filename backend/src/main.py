@@ -1,18 +1,37 @@
+import json
 from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI
 from langsmith import traceable
 from pydantic import BaseModel, Field
 
+from graphs.ask_graph import REFUSAL_SENTINEL as _REFUSAL_SENTINEL
+from graphs.ask_graph import (
+    VIDEO_NOT_INGESTED,
+    AskState,
+    build_ask_graph,
+    make_initial_state,
+)
 from graphs.ingest_graph import IngestState, build_graph
-from src.chain import answer_question
+from src.chain import (
+    _format_context,
+    _load_system_prompt,
+    _trim_to_budget,
+    answer_question,
+    build_chat_prompt,
+)
 from src.config import Settings, load_settings
 from src.embeddings import get_embeddings
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
+from src.retriever import build_retriever
+from src.vector_store import collection_exists
 
 logger = structlog.get_logger(__name__)
 
@@ -35,6 +54,12 @@ def _run_ingest_graph(
         # keep full result accessible to the caller via a side-channel key
         "_result": result,
     }
+
+
+@traceable(name="ask_question")
+def _run_ask_graph(graph, state: AskState, *, video_id: str) -> dict:
+    """Invoke the ask graph; exposes video_id to LangSmith as a run tag."""
+    return graph.invoke(state, config={"run_name": "ask_question"})
 
 
 @asynccontextmanager
@@ -67,6 +92,27 @@ class QuestionRequest(BaseModel):
 class QuestionResponse(BaseModel):
     answer: str
     sources: list[dict]
+
+
+class AskRequest(BaseModel):
+    video_id: str = Field(..., min_length=1, description="YouTube video ID")
+    question: str = Field(..., min_length=1, description="Question about the video")
+    conversation_history: list = Field(default_factory=list, description="Prior turn messages")
+    k: int = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
+
+
+class CitationSchema(BaseModel):
+    chunk_id: str | None = None
+    start_ts: float | None = None
+    end_ts: float | None = None
+    text: str
+
+
+class AskResponse(BaseModel):
+    answer: str
+    citations: list[CitationSchema]
+    tokens_used: int | None = None
+    refused: bool = False
 
 
 # --- app factory ---
@@ -161,6 +207,99 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for doc in result.sources
             ],
         )
+
+    @app.post("/ask", response_model=AskResponse)
+    async def ask(body: AskRequest):
+        s: Settings = app.state.settings
+        emb = get_embeddings(s)
+        graph = build_ask_graph(s, emb)
+        state = make_initial_state(
+            video_id=body.video_id,
+            question=body.question,
+            history=body.conversation_history,
+            k=body.k,
+        )
+        result = _run_ask_graph(graph, state, video_id=body.video_id)
+
+        if result.get("error") == VIDEO_NOT_INGESTED:
+            raise HTTPException(status_code=404, detail=VIDEO_NOT_INGESTED)
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return AskResponse(
+            answer=result["answer"],
+            citations=result["citations"],
+            tokens_used=result.get("tokens_used"),
+            refused=result.get("refused", False),
+        )
+
+    @app.post("/ask/stream")
+    async def ask_stream(body: AskRequest):
+        s: Settings = app.state.settings
+        emb = get_embeddings(s)
+
+        # Validate + retrieve before opening the SSE channel so we can raise
+        # HTTP errors instead of embedding them mid-stream.
+        if not collection_exists(body.video_id, s.vector_db_path):
+            raise HTTPException(status_code=404, detail=VIDEO_NOT_INGESTED)
+
+        retriever = build_retriever(
+            body.video_id,
+            emb,
+            s.vector_db_path,
+            k=body.k,
+            score_threshold=s.min_similarity_threshold,
+        )
+        chunks = retriever.invoke(body.question)
+
+        history = body.conversation_history or []
+        system = _load_system_prompt()
+        trimmed = (
+            _trim_to_budget(
+                chunks, system, history, body.question, s.chat_model, s.context_budget_tokens
+            )
+            if chunks
+            else []
+        )
+
+        citations = [
+            {
+                "chunk_id": doc.metadata.get("chunk_id"),
+                "start_ts": doc.metadata.get("start_ts"),
+                "end_ts": doc.metadata.get("end_ts"),
+                "text": doc.page_content,
+            }
+            for doc in trimmed
+        ]
+
+        async def event_stream():
+            if not trimmed:
+                refusal = "I'm sorry, that information isn't available in the video transcript."
+                yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True})}\n\n"
+                return
+
+            streaming_llm = ChatOpenAI(
+                model=s.chat_model,
+                openai_api_key=s.openai_api_key,
+                temperature=0.2,
+                streaming=True,
+            )
+            chain = build_chat_prompt() | streaming_llm | StrOutputParser()
+            full_answer = ""
+            async for token in chain.astream(
+                {
+                    "context": _format_context(trimmed),
+                    "question": body.question,
+                    "history": history,
+                }
+            ):
+                full_answer += token
+                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+
+            refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
+            yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused})}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return app
 

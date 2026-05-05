@@ -25,6 +25,8 @@ chroma_db/
 *.log
 
 node_modules/
-.claude/
 dist/
 
+.claude
+.slingshot
+.vscode
