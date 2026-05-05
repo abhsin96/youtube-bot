@@ -119,9 +119,11 @@ class TestAskEndpoint:
     @patch("src.main.build_ask_graph")
     @patch("src.main.get_embeddings")
     def test_conversation_history_forwarded_to_graph(self, _mock_emb, mock_build, client):
+        from langchain_core.messages import HumanMessage
+
         mock_graph = mock_build.return_value
         mock_graph.invoke.return_value = _graph_result()
-        history = [{"role": "human", "content": "prior question"}]
+        history = [{"role": "user", "content": "prior question"}]
 
         client.post(
             "/ask",
@@ -129,7 +131,9 @@ class TestAskEndpoint:
         )
 
         call_state = mock_graph.invoke.call_args[0][0]
-        assert call_state["history"] == history
+        assert len(call_state["history"]) == 1
+        assert isinstance(call_state["history"][0], HumanMessage)
+        assert call_state["history"][0].content == "prior question"
 
     @patch("src.main.build_ask_graph")
     @patch("src.main.get_embeddings")
@@ -148,6 +152,119 @@ class TestAskEndpoint:
         mock_build.return_value.invoke.return_value = _graph_result(tokens_used=None)
         data = client.post("/ask", json={"video_id": "vid1", "question": "q?"}).json()
         assert data["tokens_used"] is None
+
+
+# ---------------------------------------------------------------------------
+# Conversation history — schema validation, conversion, and cap
+# ---------------------------------------------------------------------------
+
+
+class TestConversationHistory:
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_invalid_role_returns_422(self, _mock_emb, _mock_build, client):
+        resp = client.post(
+            "/ask",
+            json={
+                "video_id": "vid1",
+                "question": "q?",
+                "conversation_history": [{"role": "human", "content": "hi"}],
+            },
+        )
+        assert resp.status_code == 422
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_user_turn_becomes_human_message(self, _mock_emb, mock_build, client):
+        from langchain_core.messages import HumanMessage
+
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.return_value = _graph_result()
+
+        client.post(
+            "/ask",
+            json={
+                "video_id": "vid1",
+                "question": "q?",
+                "conversation_history": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        history = mock_graph.invoke.call_args[0][0]["history"]
+        assert isinstance(history[0], HumanMessage)
+        assert history[0].content == "hello"
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_assistant_turn_becomes_ai_message(self, _mock_emb, mock_build, client):
+        from langchain_core.messages import AIMessage
+
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.return_value = _graph_result()
+
+        client.post(
+            "/ask",
+            json={
+                "video_id": "vid1",
+                "question": "q?",
+                "conversation_history": [{"role": "assistant", "content": "hi back"}],
+            },
+        )
+
+        history = mock_graph.invoke.call_args[0][0]["history"]
+        assert isinstance(history[0], AIMessage)
+        assert history[0].content == "hi back"
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_cap_enforced_30_turns_yields_10(self, _mock_emb, mock_build, client):
+        """Server caps history at max_history_turns (default 10) even when FE sends 30."""
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.return_value = _graph_result()
+
+        # Alternate user/assistant for 30 messages
+        turns = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
+            for i in range(30)
+        ]
+
+        client.post(
+            "/ask",
+            json={"video_id": "vid1", "question": "q?", "conversation_history": turns},
+        )
+
+        history = mock_graph.invoke.call_args[0][0]["history"]
+        assert len(history) == 10  # capped to max_history_turns
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_cap_keeps_most_recent_turns(self, _mock_emb, mock_build, client):
+        """After capping, the last N messages are kept (not the first N)."""
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.return_value = _graph_result()
+
+        turns = [{"role": "user", "content": f"msg {i}"} for i in range(30)]
+
+        client.post(
+            "/ask",
+            json={"video_id": "vid1", "question": "q?", "conversation_history": turns},
+        )
+
+        history = mock_graph.invoke.call_args[0][0]["history"]
+        # The last 10 messages should be msg 20–29
+        assert history[-1].content == "msg 29"
+        assert history[0].content == "msg 20"
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_empty_history_is_valid(self, _mock_emb, mock_build, client):
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.return_value = _graph_result()
+
+        client.post("/ask", json={"video_id": "vid1", "question": "q?"})
+
+        history = mock_graph.invoke.call_args[0][0]["history"]
+        assert history == []
 
 
 # ---------------------------------------------------------------------------

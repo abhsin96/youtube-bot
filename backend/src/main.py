@@ -1,5 +1,6 @@
 import json
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import structlog
 import uvicorn
@@ -7,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
@@ -103,10 +105,17 @@ class QuestionResponse(BaseModel):
     sources: list[dict]
 
 
+class ConversationTurn(BaseModel):
+    role: Literal["user", "assistant"] = Field(..., description="Speaker role")
+    content: str = Field(..., min_length=1, description="Message text")
+
+
 class AskRequest(BaseModel):
     video_id: str = Field(..., min_length=1, description="YouTube video ID")
     question: str = Field(..., min_length=1, description="Question about the video")
-    conversation_history: list = Field(default_factory=list, description="Prior turn messages")
+    conversation_history: list[ConversationTurn] = Field(
+        default_factory=list, description="Prior turn messages"
+    )
     k: int = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
 
 
@@ -130,6 +139,25 @@ class ApiKeyRequest(BaseModel):
 
 class ConfigStatusResponse(BaseModel):
     has_key: bool
+
+
+# --- history helpers ---
+
+
+def _to_langchain_history(
+    turns: list[ConversationTurn],
+    max_turns: int,
+) -> list[BaseMessage]:
+    """Convert validated ConversationTurn objects to LangChain message objects.
+
+    Applies the server-side cap (last *max_turns* messages) as defense-in-depth
+    so runaway front-end history can never blow the context budget.
+    """
+    capped = turns[-max_turns:] if len(turns) > max_turns else turns
+    return [
+        HumanMessage(content=t.content) if t.role == "user" else AIMessage(content=t.content)
+        for t in capped
+    ]
 
 
 # --- key resolution ---
@@ -275,7 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state = make_initial_state(
             video_id=body.video_id,
             question=body.question,
-            history=body.conversation_history,
+            history=_to_langchain_history(body.conversation_history, s.max_history_turns),
             k=body.k,
         )
         result = _run_ask_graph(graph, state, video_id=body.video_id)
@@ -312,7 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         chunks = retriever.invoke(body.question)
 
-        history = body.conversation_history or []
+        history = _to_langchain_history(body.conversation_history, s.max_history_turns)
         system = _load_system_prompt()
         trimmed = (
             _trim_to_budget(
