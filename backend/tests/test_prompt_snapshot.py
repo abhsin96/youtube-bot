@@ -112,6 +112,15 @@ def test_prompt_snapshot_contains_system_rules():
     assert "=== system ===" in rendered
     assert "ONLY" in rendered
     assert "[mm:ss]" in rendered
+    assert "[hh:mm:ss]" in rendered
+
+
+def test_prompt_timestamp_format_wording():
+    """Exact canonical wording for timestamp format must be present in the system prompt."""
+    rendered = _render(_CONTEXT, _QUESTION, history=[])
+    assert "[mm:ss] for videos under 1 hour" in rendered
+    assert "[hh:mm:ss] otherwise" in rendered
+    assert "Never use other formats" in rendered
 
 
 def test_prompt_snapshot_contains_context_verbatim():
