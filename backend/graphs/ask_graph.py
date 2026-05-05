@@ -70,16 +70,19 @@ def make_initial_state(
 # ---------------------------------------------------------------------------
 
 
-def build_ask_graph(settings, embeddings):
+def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
     """
     Compile the ask LangGraph, closing over *settings* and *embeddings*.
+
+    Pass *api_key* to override ``settings.openai_api_key`` (e.g. when the key
+    was retrieved from the OS keyring at request time).
 
     The LLM and prompt are instantiated once per compiled graph to amortise
     construction cost across repeated invocations.
     """
     vector_db_path = settings.vector_db_path
     chat_model_name = settings.chat_model
-    openai_api_key = settings.openai_api_key
+    openai_api_key = api_key or settings.openai_api_key
     score_threshold = settings.min_similarity_threshold
     context_budget_tokens = settings.context_budget_tokens
 

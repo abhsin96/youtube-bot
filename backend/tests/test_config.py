@@ -25,17 +25,19 @@ def test_defaults():
     assert s.langsmith_tracing == "false"
 
 
-# --- required field ---
+# --- openai_api_key is optional at startup (key may be provided via /config/api-key) ---
 
 
-def test_missing_openai_key_raises():
-    with pytest.raises(ValidationError, match="openai_api_key"):
-        Settings(_env_file=None)
+def test_missing_openai_key_defaults_to_empty():
+    """Server can start without OPENAI_API_KEY; key is supplied later via keyring."""
+    s = Settings(_env_file=None)
+    assert s.openai_api_key == ""
 
 
-def test_empty_openai_key_raises():
-    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
-        Settings(openai_api_key="  ", _env_file=None)
+def test_whitespace_openai_key_is_stripped():
+    """Whitespace-only value is normalised to an empty string."""
+    s = Settings(openai_api_key="  ", _env_file=None)
+    assert s.openai_api_key == ""
 
 
 # --- overrides ---

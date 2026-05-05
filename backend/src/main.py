@@ -39,6 +39,7 @@ from src.error_envelope import (
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
 from src.retriever import build_retriever
+from src.secrets import clear_api_key, get_openai_key, set_api_key
 from src.vector_store import collection_exists
 
 logger = structlog.get_logger(__name__)
@@ -123,6 +124,29 @@ class AskResponse(BaseModel):
     refused: bool = False
 
 
+class ApiKeyRequest(BaseModel):
+    api_key: str = Field(..., min_length=1, description="OpenAI API key")
+
+
+class ConfigStatusResponse(BaseModel):
+    has_key: bool
+
+
+# --- key resolution ---
+
+
+def _resolve_key(settings: Settings) -> str:
+    """Return the active OpenAI key (keyring → settings) or raise 400."""
+    key = get_openai_key(settings)
+    if not key:
+        raise AppError(
+            400,
+            "API_KEY_MISSING",
+            "No OpenAI API key configured. POST to /config/api-key to set one.",
+        )
+    return key
+
+
 # --- app factory ---
 
 
@@ -160,13 +184,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": "ok",
             "version": s.version,
             "langsmith_enabled": s.langsmith_tracing.lower() == "true",
-            "has_api_key": bool(s.openai_api_key),
+            "has_api_key": bool(get_openai_key(s)),
         }
+
+    # --- /config routes ---
+
+    @app.post("/config/api-key", status_code=204)
+    async def config_set_api_key(body: ApiKeyRequest):
+        set_api_key(body.api_key)
+
+    @app.delete("/config/api-key", status_code=204)
+    async def config_clear_api_key():
+        clear_api_key()
+
+    @app.get("/config/status", response_model=ConfigStatusResponse)
+    async def config_status():
+        s: Settings = app.state.settings
+        return ConfigStatusResponse(has_key=bool(get_openai_key(s)))
+
+    # --- /ingest ---
 
     @app.post("/ingest", response_model=IngestResponse)
     async def ingest(body: IngestRequest):
         s: Settings = app.state.settings
-        embeddings = get_embeddings(s)
+        key = _resolve_key(s)
+        embeddings = get_embeddings(s, api_key=key)
 
         initial_state: IngestState = {
             "video_id": body.video_id,
@@ -198,14 +240,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/chat/{video_id}", response_model=QuestionResponse)
     async def chat(video_id: str, body: QuestionRequest):
         s: Settings = app.state.settings
-        embeddings = get_embeddings(s)
+        key = _resolve_key(s)
+        embeddings = get_embeddings(s, api_key=key)
         result = answer_question(
             video_id=video_id,
             question=body.question,
             embeddings=embeddings,
             vector_db_path=s.vector_db_path,
             chat_model=s.chat_model,
-            openai_api_key=s.openai_api_key,
+            openai_api_key=key,
             k=body.k,
             score_threshold=s.min_similarity_threshold,
             context_budget_tokens=s.context_budget_tokens,
@@ -226,8 +269,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/ask", response_model=AskResponse)
     async def ask(body: AskRequest):
         s: Settings = app.state.settings
-        emb = get_embeddings(s)
-        graph = build_ask_graph(s, emb)
+        key = _resolve_key(s)
+        emb = get_embeddings(s, api_key=key)
+        graph = build_ask_graph(s, emb, api_key=key)
         state = make_initial_state(
             video_id=body.video_id,
             question=body.question,
@@ -251,7 +295,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/ask/stream")
     async def ask_stream(body: AskRequest):
         s: Settings = app.state.settings
-        emb = get_embeddings(s)
+        key = _resolve_key(s)
+        emb = get_embeddings(s, api_key=key)
 
         # Validate + retrieve before opening the SSE channel so we can raise
         # HTTP errors instead of embedding them mid-stream.
@@ -295,7 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             streaming_llm = ChatOpenAI(
                 model=s.chat_model,
-                openai_api_key=s.openai_api_key,
+                openai_api_key=key,
                 temperature=0.2,
                 streaming=True,
             )

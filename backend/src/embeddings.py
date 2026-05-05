@@ -43,9 +43,14 @@ def _build(model: str, api_key: str) -> OpenAIEmbeddings:
     return OpenAIEmbeddings(model=model, openai_api_key=api_key)
 
 
-def get_embeddings(settings: Settings) -> OpenAIEmbeddings:
-    """Return a cached OpenAIEmbeddings instance for the model in *settings*."""
-    return _build(settings.embed_model, settings.openai_api_key)
+def get_embeddings(settings: Settings, *, api_key: str | None = None) -> OpenAIEmbeddings:
+    """Return a cached OpenAIEmbeddings instance for the model in *settings*.
+
+    Pass *api_key* explicitly to use a key sourced from the OS keyring rather
+    than the one baked into *settings* at startup.
+    """
+    key = api_key or settings.openai_api_key
+    return _build(settings.embed_model, key)
 
 
 @retry(**_RETRY)

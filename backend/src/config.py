@@ -12,8 +12,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- required ---
-    openai_api_key: str
+    # --- API key (optional at startup; may be provided later via /config/api-key) ---
+    openai_api_key: str = ""
 
     # --- LangSmith ---
     langsmith_api_key: str = ""
@@ -38,10 +38,9 @@ class Settings(BaseSettings):
 
     @field_validator("openai_api_key")
     @classmethod
-    def require_openai_key(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("OPENAI_API_KEY must not be empty")
-        return v
+    def strip_openai_key(cls, v: str) -> str:
+        # Key is optional at startup; it may be supplied via POST /config/api-key.
+        return v.strip()
 
     @field_validator("min_similarity_threshold")
     @classmethod
