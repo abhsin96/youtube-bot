@@ -162,7 +162,7 @@ def test_ingest_502_on_graph_error(client):
     with patch("src.main._run_ingest_graph", return_value=_TRACED_ERROR):
         resp = client.post("/ingest", json={"video_id": "vid1"})
     assert resp.status_code == 502
-    assert "transcript disabled" in resp.json()["detail"]
+    assert "transcript disabled" in resp.json()["error"]["message"]
 
 
 def test_ingest_422_on_empty_video_id(client):

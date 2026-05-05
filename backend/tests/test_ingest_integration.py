@@ -207,7 +207,7 @@ def test_transcript_failure_returns_502(client):
         resp = client.post("/ingest", json={"video_id": "vid1"})
 
     assert resp.status_code == 502
-    assert "no captions" in resp.json()["detail"]
+    assert "no captions" in resp.json()["error"]["message"]
 
 
 def test_transcript_failure_triggers_rollback(client):
@@ -253,7 +253,7 @@ def test_embed_failure_returns_502(client):
         resp = client.post("/ingest", json={"video_id": "vid1"})
 
     assert resp.status_code == 502
-    assert "rate limit" in resp.json()["detail"]
+    assert "rate limit" in resp.json()["error"]["message"]
 
 
 def test_embed_failure_triggers_rollback(client):
@@ -306,7 +306,7 @@ def test_store_failure_returns_502(client):
         resp = client.post("/ingest", json={"video_id": "vid1"})
 
     assert resp.status_code == 502
-    assert "chroma down" in resp.json()["detail"]
+    assert "chroma down" in resp.json()["error"]["message"]
 
 
 def test_store_failure_triggers_rollback(client):
@@ -340,7 +340,7 @@ def test_rollback_failure_does_not_mask_original_error(client):
         resp = client.post("/ingest", json={"video_id": "vid1"})
 
     assert resp.status_code == 502
-    assert "no captions" in resp.json()["detail"]
+    assert "no captions" in resp.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------

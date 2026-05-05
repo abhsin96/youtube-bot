@@ -100,7 +100,7 @@ class TestAskEndpoint:
         )
         resp = client.post("/ask", json={"video_id": "missing", "question": "q?"})
         assert resp.status_code == 404
-        assert resp.json()["detail"] == VIDEO_NOT_INGESTED
+        assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
     @patch("src.main.build_ask_graph")
     @patch("src.main.get_embeddings")
@@ -161,7 +161,7 @@ class TestAskStreamEndpoint:
     def test_not_ingested_returns_404(self, _mock_emb, _mock_ce, client):
         resp = client.post("/ask/stream", json={"video_id": "missing", "question": "q?"})
         assert resp.status_code == 404
-        assert resp.json()["detail"] == VIDEO_NOT_INGESTED
+        assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
     @patch("src.main.collection_exists", return_value=True)
     @patch("src.main.build_retriever")

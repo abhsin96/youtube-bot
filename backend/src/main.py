@@ -3,13 +3,15 @@ from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from graphs.ask_graph import REFUSAL_SENTINEL as _REFUSAL_SENTINEL
 from graphs.ask_graph import (
@@ -28,6 +30,12 @@ from src.chain import (
 )
 from src.config import Settings, load_settings
 from src.embeddings import get_embeddings
+from src.error_envelope import (
+    AppError,
+    app_error_handler,
+    http_exception_handler,
+    validation_error_handler,
+)
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
 from src.retriever import build_retriever
@@ -127,6 +135,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="youtube-extention", lifespan=lifespan)
     app.state.settings = settings
 
+    app.add_exception_handler(AppError, app_error_handler)
+    # Register for both the Starlette base class (raised by the router, e.g. 405)
+    # and FastAPI's subclass so all HTTP errors go through our envelope.
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
+
     # RequestIDMiddleware must be outermost so request_id is bound before CORS
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(
@@ -172,7 +187,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         if traced["status"] == "error":
-            raise HTTPException(status_code=502, detail=traced["error"])
+            raise AppError(502, "INGEST_FAILED", traced["error"] or "Ingestion failed")
 
         return IngestResponse(
             status=traced["status"],
@@ -222,9 +237,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         result = _run_ask_graph(graph, state, video_id=body.video_id)
 
         if result.get("error") == VIDEO_NOT_INGESTED:
-            raise HTTPException(status_code=404, detail=VIDEO_NOT_INGESTED)
+            raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
         if result.get("error"):
-            raise HTTPException(status_code=500, detail=result["error"])
+            raise AppError(500, "INTERNAL_ERROR", result["error"])
 
         return AskResponse(
             answer=result["answer"],
@@ -241,7 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Validate + retrieve before opening the SSE channel so we can raise
         # HTTP errors instead of embedding them mid-stream.
         if not collection_exists(body.video_id, s.vector_db_path):
-            raise HTTPException(status_code=404, detail=VIDEO_NOT_INGESTED)
+            raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
         retriever = build_retriever(
             body.video_id,
