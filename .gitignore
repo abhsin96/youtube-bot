@@ -30,3 +30,14 @@ dist/
 .claude
 .slingshot
 .vscode
+# Added by code-review-graph
+.code-review-graph/
+.cursor/
+.kiro/
+.cursorrules
+.mcp.json
+.opencode.json
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+GEMINI.md

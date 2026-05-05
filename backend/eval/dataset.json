@@ -1,0 +1,92 @@
+{
+  "name": "python-tutorial-e2e-baseline",
+  "description": "Q/A pairs for the fixture Python tutorial video used in E2E tests. Run against a live backend to detect answer-quality regressions.",
+  "video_id": "fixture_python_e2e_01",
+  "version": "1",
+  "cases": [
+    {
+      "id": "lc-01",
+      "question": "What is a list comprehension?",
+      "expected_topics": ["list", "comprehension", "concise"],
+      "expected_min_citations": 1,
+      "tags": ["basics", "list-comprehension"]
+    },
+    {
+      "id": "lc-02",
+      "question": "How do I filter items in a list comprehension?",
+      "expected_topics": ["filter", "if", "condition"],
+      "expected_min_citations": 1,
+      "tags": ["basics", "list-comprehension"]
+    },
+    {
+      "id": "dict-01",
+      "question": "What is a dictionary comprehension?",
+      "expected_topics": ["dictionary", "comprehension", "key", "value"],
+      "expected_min_citations": 1,
+      "tags": ["basics", "dict-comprehension"]
+    },
+    {
+      "id": "lambda-01",
+      "question": "What is a lambda function in Python?",
+      "expected_topics": ["lambda", "anonymous", "function"],
+      "expected_min_citations": 1,
+      "tags": ["functions", "lambda"]
+    },
+    {
+      "id": "lambda-02",
+      "question": "Can you show an example of a lambda function?",
+      "expected_topics": ["lambda", "example"],
+      "expected_min_citations": 1,
+      "tags": ["functions", "lambda"]
+    },
+    {
+      "id": "decorator-01",
+      "question": "What are decorators and how do I use them?",
+      "expected_topics": ["decorator", "function", "@"],
+      "expected_min_citations": 1,
+      "tags": ["advanced", "decorators"]
+    },
+    {
+      "id": "ctx-01",
+      "question": "What is a context manager?",
+      "expected_topics": ["context", "manager", "with"],
+      "expected_min_citations": 1,
+      "tags": ["advanced", "context-managers"]
+    },
+    {
+      "id": "ctx-02",
+      "question": "How does the with statement work with files?",
+      "expected_topics": ["with", "open", "file", "close"],
+      "expected_min_citations": 1,
+      "tags": ["advanced", "context-managers"]
+    },
+    {
+      "id": "gen-01",
+      "question": "What is a generator expression?",
+      "expected_topics": ["generator", "expression", "memory", "lazy"],
+      "expected_min_citations": 1,
+      "tags": ["advanced", "generators"]
+    },
+    {
+      "id": "types-01",
+      "question": "How do type hints work in Python?",
+      "expected_topics": ["type", "hint", "annotation"],
+      "expected_min_citations": 1,
+      "tags": ["typing"]
+    },
+    {
+      "id": "fstr-01",
+      "question": "What are f-strings and how do I use them?",
+      "expected_topics": ["f-string", "format", "expression"],
+      "expected_min_citations": 1,
+      "tags": ["strings"]
+    },
+    {
+      "id": "unpack-01",
+      "question": "How does unpacking work in Python?",
+      "expected_topics": ["unpack", "assign", "star"],
+      "expected_min_citations": 1,
+      "tags": ["basics", "unpacking"]
+    }
+  ]
+}

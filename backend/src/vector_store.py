@@ -39,11 +39,42 @@ def _make_store(
     create: bool = True,
 ) -> Chroma:
     client = _get_client(persist_directory)
+    collection_name = _collection_name(video_id)
+
+    # For existing collections, check and potentially recreate with correct metric
+    existing_collections = {c.name: c for c in client.list_collections()}
+
+    if collection_name in existing_collections:
+        existing_coll = existing_collections[collection_name]
+        # Check if it has the wrong distance metric
+        config = existing_coll.configuration
+        hnsw_space = config.get("hnsw", {}).get("space") if config else None
+
+        if hnsw_space and hnsw_space != "cosine":
+            # Delete and recreate with correct metric
+            logger.info(
+                "recreating collection with cosine metric",
+                video_id=video_id,
+                old_metric=hnsw_space,
+            )
+            client.delete_collection(collection_name)
+            # Now create new collection with cosine metric
+            if create:
+                client.create_collection(
+                    name=collection_name,
+                    metadata={"hnsw:space": "cosine"},
+                )
+    elif create:
+        # Collection doesn't exist, create it with cosine metric
+        client.create_collection(
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+
     return Chroma(
         client=client,
-        collection_name=_collection_name(video_id),
+        collection_name=collection_name,
         embedding_function=embedding,
-        create_collection_if_not_exists=create,
     )
 
 
@@ -90,3 +121,9 @@ def delete_collection(video_id: str, persist_directory: str | Path) -> None:
         logger.info("collection deleted", video_id=video_id)
     else:
         logger.info("collection not found, skipping delete", video_id=video_id)
+
+
+def recreate_collection_with_correct_metric(video_id: str, persist_directory: str | Path) -> None:
+    """Delete and recreate collection to ensure correct distance metric."""
+    delete_collection(video_id, persist_directory)
+    logger.info("collection recreated with cosine metric", video_id=video_id)

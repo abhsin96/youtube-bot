@@ -284,6 +284,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 k=body.k,
                 score_threshold=s.min_similarity_threshold,
                 context_budget_tokens=s.context_budget_tokens,
+                openai_api_base=s.openai_api_base,
             )
         except Exception as exc:
             logger.exception("chat_error", video_id=video_id)
@@ -374,12 +375,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True})}\n\n"
                     return
 
-                streaming_llm = ChatOpenAI(
-                    model=s.chat_model,
-                    openai_api_key=key,
-                    temperature=0.2,
-                    streaming=True,
-                )
+                stream_kwargs: dict = {
+                    "model": s.chat_model,
+                    "openai_api_key": key,
+                    "temperature": 0.2,
+                    "streaming": True,
+                }
+                if s.openai_api_base:
+                    stream_kwargs["base_url"] = s.openai_api_base
+                streaming_llm = ChatOpenAI(**stream_kwargs)
                 chain = build_chat_prompt() | streaming_llm | StrOutputParser()
                 full_answer = ""
                 async for token in chain.astream(

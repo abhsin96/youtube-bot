@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     langsmith_project: str = "youtube-extention"
     langsmith_tracing: str = "false"
 
+    # --- OpenAI base URL override (empty = use default api.openai.com) ---
+    openai_api_base: str = ""
+
     # --- models ---
     embed_model: str = "text-embedding-3-small"
     chat_model: str = "gpt-4o-mini"

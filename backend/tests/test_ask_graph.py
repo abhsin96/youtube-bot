@@ -23,6 +23,7 @@ def settings():
     s.vector_db_path = "/tmp/chroma_test"
     s.chat_model = "gpt-4o-mini"
     s.openai_api_key = "sk-test"
+    s.openai_api_base = None  # Explicitly set to None to avoid MagicMock return
     s.min_similarity_threshold = 0.0
     s.context_budget_tokens = 6000
     return s

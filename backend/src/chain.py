@@ -119,14 +119,17 @@ def build_chat_prompt() -> ChatPromptTemplate:
     )
 
 
-def build_rag_chain(chat_model: str, openai_api_key: str):
+def build_rag_chain(chat_model: str, openai_api_key: str, openai_api_base: str = ""):
     """Return an LCEL chain: {context, question, history} → answer str."""
-    llm = ChatOpenAI(
-        model=chat_model,
-        openai_api_key=openai_api_key,
-        temperature=0.2,
-        streaming=True,
-    )
+    kwargs: dict = {
+        "model": chat_model,
+        "openai_api_key": openai_api_key,
+        "temperature": 0.2,
+        "streaming": True,
+    }
+    if openai_api_base:
+        kwargs["base_url"] = openai_api_base
+    llm = ChatOpenAI(**kwargs)
     return build_chat_prompt() | llm | StrOutputParser()
 
 
@@ -141,6 +144,7 @@ def answer_question(
     score_threshold: float = 0.0,
     history: list[BaseMessage] | None = None,
     context_budget_tokens: int = 6000,
+    openai_api_base: str = "",
 ) -> RAGResult:
     """Retrieve relevant chunks then call the LLM; return answer + sources."""
     retriever = build_retriever(
@@ -169,7 +173,7 @@ def answer_question(
         )
 
     context = _format_context(sources)
-    chain = build_rag_chain(chat_model, openai_api_key)
+    chain = build_rag_chain(chat_model, openai_api_key, openai_api_base)
     answer = chain.invoke(
         {
             "context": context,

@@ -38,9 +38,12 @@ def _estimate_cost(token_count: int, model: str) -> float:
     return round(token_count / 1000 * rate, 8)
 
 
-@lru_cache(maxsize=4)
-def _build(model: str, api_key: str) -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(model=model, openai_api_key=api_key)
+@lru_cache(maxsize=8)
+def _build(model: str, api_key: str, base_url: str) -> OpenAIEmbeddings:
+    kwargs: dict = {"model": model, "openai_api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAIEmbeddings(**kwargs)
 
 
 def get_embeddings(settings: Settings, *, api_key: str | None = None) -> OpenAIEmbeddings:
@@ -50,7 +53,7 @@ def get_embeddings(settings: Settings, *, api_key: str | None = None) -> OpenAIE
     than the one baked into *settings* at startup.
     """
     key = api_key or settings.openai_api_key
-    return _build(settings.embed_model, key)
+    return _build(settings.embed_model, key, settings.openai_api_base)
 
 
 @retry(**_RETRY)

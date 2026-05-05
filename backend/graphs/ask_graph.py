@@ -84,13 +84,17 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
     openai_api_key = api_key or settings.openai_api_key
     score_threshold = settings.min_similarity_threshold
     context_budget_tokens = settings.context_budget_tokens
+    openai_api_base: str = getattr(settings, "openai_api_base", "")
 
-    llm = ChatOpenAI(
-        model=chat_model_name,
-        openai_api_key=openai_api_key,
-        temperature=0.2,
-        streaming=False,
-    )
+    llm_kwargs: dict = {
+        "model": chat_model_name,
+        "openai_api_key": openai_api_key,
+        "temperature": 0.2,
+        "streaming": False,
+    }
+    if openai_api_base:
+        llm_kwargs["base_url"] = openai_api_base
+    llm = ChatOpenAI(**llm_kwargs)
     prompt_template = build_chat_prompt()
 
     # ── Nodes ────────────────────────────────────────────────────────────────
