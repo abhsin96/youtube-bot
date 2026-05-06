@@ -74,15 +74,22 @@ def clear_api_key() -> None:
 
 
 def get_openai_key(settings) -> str | None:
-    """Resolve the OpenAI key: keyring first, then ``settings.openai_api_key``.
+    """Resolve the OpenAI key: keyring first, then settings.openai_api_key.
+
+    Priority order:
+    1. OS keyring (set via /config/api-key endpoint)
+    2. Environment variable (OPENAI_API_KEY in .env)
 
     Returns *None* if no key is available from either source.
     """
-    key = get_api_key()
-    if key:
-        return key
-    fallback = getattr(settings, "openai_api_key", "") or ""
-    return fallback or None
+    # Check keyring FIRST (higher priority)
+    keyring_key = get_api_key()
+    if keyring_key:
+        return keyring_key
+
+    # Fall back to environment variable if no keyring key
+    env_key = getattr(settings, "openai_api_key", "") or ""
+    return env_key or None
 
 
 # ---------------------------------------------------------------------------

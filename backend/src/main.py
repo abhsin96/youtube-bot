@@ -4,7 +4,8 @@ from typing import Literal
 
 import structlog
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -48,7 +49,7 @@ from src.vector_store import collection_exists
 logger = structlog.get_logger(__name__)
 
 
-@traceable(name="ingest_video")
+@traceable(name="ingest_video", metadata={"operation": "ingest"})
 def _run_ingest_graph(
     initial_state: IngestState,
     *,
@@ -68,10 +69,19 @@ def _run_ingest_graph(
     }
 
 
-@traceable(name="ask_question")
-def _run_ask_graph(graph, state: AskState, *, video_id: str) -> dict:
+@traceable(name="ask_question", metadata={"operation": "ask"})
+def _run_ask_graph(graph, state: AskState, *, video_id: str, thread_id: str | None = None) -> dict:
     """Invoke the ask graph; exposes video_id to LangSmith as a run tag."""
-    return graph.invoke(state, config={"run_name": "ask_question"})
+    config = {"run_name": "ask_question"}
+    if thread_id:
+        config["metadata"] = {"thread_id": thread_id}
+    return graph.invoke(state, config=config)
+
+
+@traceable(name="answer_question", metadata={"operation": "chat"})
+def _run_answer_question(*args, **kwargs):
+    """Bridge for running answer_question in a threadpool with tracing."""
+    return answer_question(*args, **kwargs)
 
 
 @asynccontextmanager
@@ -253,7 +263,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "error": None,
         }
 
-        traced = _run_ingest_graph(
+        traced = await run_in_threadpool(
+            _run_ingest_graph,
             initial_state,
             video_id=body.video_id,
             embed_model=s.embed_model,
@@ -269,12 +280,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post("/chat/{video_id}", response_model=QuestionResponse)
-    async def chat(video_id: str, body: QuestionRequest):
+    @traceable(name="Chat Bot", metadata={"endpoint": "/chat"})
+    async def chat(video_id: str, body: QuestionRequest, request: Request):
         s: Settings = app.state.settings
         key = _resolve_key(s)
         embeddings = get_embeddings(s, api_key=key)
+
+        # Use request ID as thread_id for tracing
+        thread_id = getattr(request.state, "request_id", None)
+
         try:
-            result = answer_question(
+            result = await run_in_threadpool(
+                _run_answer_question,
                 video_id=video_id,
                 question=body.question,
                 embeddings=embeddings,
@@ -287,7 +304,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 openai_api_base=s.openai_api_base,
             )
         except Exception as exc:
-            logger.exception("chat_error", video_id=video_id)
+            logger.exception("chat_error", video_id=video_id, thread_id=thread_id)
             raise AppError(500, "INTERNAL_ERROR", "An unexpected error occurred.") from exc
         return QuestionResponse(
             answer=result.answer,
@@ -303,18 +320,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post("/ask", response_model=AskResponse)
-    async def ask(body: AskRequest):
+    @traceable(name="Chat Bot", metadata={"endpoint": "/ask"})
+    async def ask(body: AskRequest, request: Request):
         s: Settings = app.state.settings
         key = _resolve_key(s)
         emb = get_embeddings(s, api_key=key)
         graph = build_ask_graph(s, emb, api_key=key)
+
+        # Use request ID as thread_id for tracing
+        thread_id = getattr(request.state, "request_id", None)
+
         state = make_initial_state(
             video_id=body.video_id,
             question=body.question,
             history=_to_langchain_history(body.conversation_history, s.max_history_turns),
             k=body.k,
         )
-        result = _run_ask_graph(graph, state, video_id=body.video_id)
+        result = await run_in_threadpool(
+            _run_ask_graph, graph, state, video_id=body.video_id, thread_id=thread_id
+        )
 
         if result.get("error") == VIDEO_NOT_INGESTED:
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
@@ -329,10 +353,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post("/ask/stream")
-    async def ask_stream(body: AskRequest):
+    @traceable(name="Chat Bot Stream", metadata={"endpoint": "/ask/stream"})
+    async def ask_stream(body: AskRequest, request: Request):
         s: Settings = app.state.settings
         key = _resolve_key(s)
         emb = get_embeddings(s, api_key=key)
+
+        # Use request ID as thread_id for tracing
+        thread_id = getattr(request.state, "request_id", None)
+        logger.info("ask_stream_started", video_id=body.video_id, thread_id=thread_id)
 
         # Validate + retrieve before opening the SSE channel so we can raise
         # HTTP errors instead of embedding them mid-stream.
