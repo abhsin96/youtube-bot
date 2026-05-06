@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
-from langsmith import traceable
+from langsmith import traceable, uuid7
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -128,6 +128,7 @@ class AskRequest(BaseModel):
         default_factory=list, description="Prior turn messages"
     )
     k: int = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
+    thread_id: str | None = Field(None, description="Thread ID for conversation tracking")
 
 
 class CitationSchema(BaseModel):
@@ -142,6 +143,7 @@ class AskResponse(BaseModel):
     citations: list[CitationSchema]
     tokens_used: int | None = None
     refused: bool = False
+    thread_id: str
 
 
 class ApiKeyRequest(BaseModel):
@@ -320,15 +322,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post("/ask", response_model=AskResponse)
-    @traceable(name="Chat Bot", metadata={"endpoint": "/ask"})
     async def ask(body: AskRequest, request: Request):
         s: Settings = app.state.settings
         key = _resolve_key(s)
         emb = get_embeddings(s, api_key=key)
         graph = build_ask_graph(s, emb, api_key=key)
 
-        # Use request ID as thread_id for tracing
-        thread_id = getattr(request.state, "request_id", None)
+        # Generate or use provided thread_id for conversation tracking
+        thread_id = body.thread_id or str(uuid7())
+        logger.info("ask_started", video_id=body.video_id, thread_id=thread_id)
 
         state = make_initial_state(
             video_id=body.video_id,
@@ -336,9 +338,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             history=_to_langchain_history(body.conversation_history, s.max_history_turns),
             k=body.k,
         )
-        result = await run_in_threadpool(
-            _run_ask_graph, graph, state, video_id=body.video_id, thread_id=thread_id
-        )
+
+        # Wrap the graph invocation with @traceable and thread metadata
+        @traceable(name="Chat Bot", metadata={"thread_id": thread_id, "endpoint": "/ask"})
+        def run_ask_with_thread():
+            return _run_ask_graph(graph, state, video_id=body.video_id, thread_id=thread_id)
+
+        result = await run_in_threadpool(run_ask_with_thread)
 
         if result.get("error") == VIDEO_NOT_INGESTED:
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
@@ -350,17 +356,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             citations=result["citations"],
             tokens_used=result.get("tokens_used"),
             refused=result.get("refused", False),
+            thread_id=thread_id,
         )
 
     @app.post("/ask/stream")
-    @traceable(name="Chat Bot Stream", metadata={"endpoint": "/ask/stream"})
     async def ask_stream(body: AskRequest, request: Request):
         s: Settings = app.state.settings
         key = _resolve_key(s)
         emb = get_embeddings(s, api_key=key)
 
-        # Use request ID as thread_id for tracing
-        thread_id = getattr(request.state, "request_id", None)
+        # Generate or use provided thread_id for conversation tracking
+        thread_id = body.thread_id or str(uuid7())
         logger.info("ask_stream_started", video_id=body.video_id, thread_id=thread_id)
 
         # Validate + retrieve before opening the SSE channel so we can raise
@@ -397,11 +403,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for doc in trimmed
         ]
 
+        @traceable(
+            name="Chat Bot Stream", metadata={"thread_id": thread_id, "endpoint": "/ask/stream"}
+        )
         async def event_stream():
             try:
                 if not trimmed:
                     refusal = "I'm sorry, that information isn't available in the video transcript."
-                    yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True, 'thread_id': thread_id})}\n\n"
                     return
 
                 stream_kwargs: dict = {
@@ -426,7 +435,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
                 refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
-                yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused, 'thread_id': thread_id})}\n\n"
             except Exception:
                 logger.exception("stream_error", video_id=body.video_id)
                 yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"

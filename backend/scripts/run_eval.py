@@ -27,7 +27,11 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+
+from langsmith import Client
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,9 +44,6 @@ _DEFAULT_DATASET = _REPO_ROOT / "eval" / "dataset.json"
 
 def _call_ask(backend_url: str, video_id: str, question: str) -> dict:
     """POST /ask and return the parsed JSON body, or a synthetic error dict."""
-    import urllib.request
-    import urllib.error
-
     payload = json.dumps({"video_id": video_id, "question": question, "k": 5}).encode()
     req = urllib.request.Request(
         f"{backend_url}/ask",
@@ -94,8 +95,6 @@ def _check_case(case: dict, response: dict) -> tuple[bool, list[str]]:
 def _upload_to_langsmith(dataset_meta: dict, results: list[dict]) -> None:
     """Push results to a LangSmith dataset (best-effort)."""
     try:
-        from langsmith import Client
-
         client = Client()
         ds_name = dataset_meta.get("name", "eval-dataset")
         try:

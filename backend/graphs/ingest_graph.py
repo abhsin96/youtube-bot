@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 import structlog
+from langgraph.graph import END, StateGraph
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
@@ -255,8 +256,6 @@ def route_idempotency(state: IngestState) -> str:
     running → fetch_transcript_node
     """
     if state["status"] == "skipped":
-        from langgraph.graph import END
-
         return END
     if state["status"] == "error":
         return "rollback_node"
@@ -297,8 +296,6 @@ def build_graph():
                                                                               ├─ error → rollback_node → END
                                                                               └─ ok    → END
     """
-    from langgraph.graph import END, StateGraph
-
     g = StateGraph(IngestState)
 
     g.add_node("idempotency_check_node", idempotency_check_node)

@@ -13,6 +13,7 @@ import structlog
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
+from langsmith.run_helpers import get_current_run_tree
 from typing_extensions import TypedDict
 
 from src.chain import _format_context, _load_system_prompt, _trim_to_budget, build_chat_prompt
@@ -138,8 +139,6 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
     def refuse_node(state: AskState) -> dict:  # noqa: ARG001
         """Emit the standard refusal when no context was found."""
         try:
-            from langsmith.run_helpers import get_current_run_tree
-
             rt = get_current_run_tree()
             if rt is not None:
                 rt.add_metadata(
