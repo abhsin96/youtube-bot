@@ -10,6 +10,7 @@ langgraph
 langsmith
 chromadb
 youtube-transcript-api
+ddgs
 tiktoken
 pydantic-settings
 tenacity

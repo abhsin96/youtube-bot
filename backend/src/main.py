@@ -273,6 +273,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "segments": [],
             "chunks": [],
             "embedded_chunks": [],
+            "channel_metadata": {},
             "status": "pending",
             "error": None,
         }

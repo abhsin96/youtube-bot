@@ -55,8 +55,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.chunker import chunk_documents as _chunk_documents  # noqa: E402
 from src.document_converter import segments_to_documents  # noqa: E402
 from src.embeddings import embed_chunks  # noqa: E402
+from src.metadata_service import fetch_video_metadata  # noqa: E402
 from src.transcript_service import TranscriptSegment, fetch_transcript  # noqa: E402
-from src.vector_store import add_documents, collection_exists, delete_collection  # noqa: E402
+from src.vector_store import add_documents, collection_exists, delete_collection, save_channel_metadata  # noqa: E402
 
 logger = structlog.get_logger(__name__)
 
@@ -105,6 +106,11 @@ class IngestState(TypedDict):
     """(Document, embedding-vector) pairs ready for storage.
     Populated by: embed_chunks_node."""
 
+    # ── optional enrichment ────────────────────────────────────────────────
+    channel_metadata: dict
+    """title, channel_name, channel_url — fetched during ingest for creator Q&A.
+    Populated by: fetch_metadata_node.  May be empty dict on failure."""
+
     # ── control fields ─────────────────────────────────────────────────────
     status: IngestStatus
     """Current pipeline status.  Starts as 'pending'; terminal values are
@@ -148,6 +154,21 @@ def idempotency_check_node(state: IngestState) -> dict:
 
     logger.info("starting ingestion", video_id=state["video_id"], force=state["force"])
     return {"status": "running"}
+
+
+def fetch_metadata_node(state: IngestState) -> dict:
+    """Fetch video title and channel name via YouTube's oEmbed API.
+
+    Failure is non-fatal — returns an empty dict so the pipeline continues.
+    Owns: channel_metadata
+    """
+    meta = fetch_video_metadata(state["video_id"])
+    logger.info(
+        "channel_metadata_fetched",
+        video_id=state["video_id"],
+        channel=meta.get("channel_name"),
+    )
+    return {"channel_metadata": meta}
 
 
 def fetch_transcript_node(state: IngestState) -> dict:
@@ -216,6 +237,14 @@ def store_node(state: IngestState) -> dict:
     except Exception as exc:
         logger.error("store failed", video_id=state["video_id"], error=str(exc))
         return _error(str(exc))
+
+    # Persist channel metadata alongside the vector collection (best-effort).
+    channel_meta = state.get("channel_metadata") or {}
+    if channel_meta:
+        try:
+            save_channel_metadata(state["video_id"], state["vector_db_path"], channel_meta)
+        except Exception as exc:
+            logger.warning("channel_metadata_save_failed", video_id=state["video_id"], error=str(exc))
 
     logger.info(
         "ingestion done",
@@ -299,6 +328,7 @@ def build_graph():
     g = StateGraph(IngestState)
 
     g.add_node("idempotency_check_node", idempotency_check_node)
+    g.add_node("fetch_metadata_node", fetch_metadata_node)
     g.add_node("fetch_transcript_node", fetch_transcript_node)
     g.add_node("chunk_node", chunk_node)
     g.add_node("embed_node", embed_node)
@@ -311,11 +341,14 @@ def build_graph():
         "idempotency_check_node",
         route_idempotency,
         {
-            "fetch_transcript_node": "fetch_transcript_node",
+            "fetch_transcript_node": "fetch_metadata_node",  # metadata first, then transcript
             "rollback_node": "rollback_node",
             END: END,
         },
     )
+
+    # Metadata fetch is non-fatal; always proceed to transcript fetch.
+    g.add_edge("fetch_metadata_node", "fetch_transcript_node")
     g.add_conditional_edges(
         "fetch_transcript_node",
         route_on_error,

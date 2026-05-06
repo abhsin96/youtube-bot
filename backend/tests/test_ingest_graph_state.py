@@ -11,6 +11,7 @@ _REQUIRED_KEYS = {
     "segments",
     "chunks",
     "embedded_chunks",
+    "channel_metadata",
     "status",
     "error",
 }

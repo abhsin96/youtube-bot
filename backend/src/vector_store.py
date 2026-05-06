@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -127,3 +128,32 @@ def recreate_collection_with_correct_metric(video_id: str, persist_directory: st
     """Delete and recreate collection to ensure correct distance metric."""
     delete_collection(video_id, persist_directory)
     logger.info("collection recreated with cosine metric", video_id=video_id)
+
+
+# ---------------------------------------------------------------------------
+# Channel metadata  (JSON sidecar alongside the Chroma DB directory)
+# ---------------------------------------------------------------------------
+
+
+def _metadata_path(video_id: str, persist_directory: str | Path) -> Path:
+    return Path(persist_directory) / f"{_sanitize_video_id(video_id)}_meta.json"
+
+
+def save_channel_metadata(video_id: str, persist_directory: str | Path, metadata: dict) -> None:
+    """Persist channel metadata (title, channel_name, channel_url) to disk."""
+    path = _metadata_path(video_id, persist_directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metadata, ensure_ascii=False))
+    logger.info("channel_metadata_saved", video_id=video_id, channel=metadata.get("channel_name"))
+
+
+def get_channel_metadata(video_id: str, persist_directory: str | Path) -> dict:
+    """Return saved channel metadata, or an empty dict if not yet stored."""
+    path = _metadata_path(video_id, persist_directory)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("channel_metadata_read_failed", video_id=video_id, error=str(exc))
+        return {}

@@ -1,7 +1,13 @@
 """
 LangGraph RAG flow for the /ask endpoint.
 
-Flow:  validate → retrieve → guardrail_check → (refuse | generate) → format_response
+Flow:
+  validate → retrieve → detect_intent
+                              ├─ creator question → creator_search ──┐
+                              └─ video question → guardrail_check     │
+                                                    ├─ no chunks → refuse → format_response → END
+                                                    └─ chunks → generate ◄──────────────────────┘
+                                                                   └─ format_response → END
 
 State travels through every node; nodes return partial dicts that are merged
 into the running AskState by LangGraph.
@@ -17,13 +23,34 @@ from langsmith.run_helpers import get_current_run_tree
 from typing_extensions import TypedDict
 
 from src.chain import _format_context, _load_system_prompt, _trim_to_budget, build_chat_prompt
+from src.metadata_service import fetch_video_metadata
 from src.retriever import build_retriever
-from src.vector_store import collection_exists
+from src.vector_store import collection_exists, get_channel_metadata
+from src.web_search import search_creator_info
 
 logger = structlog.get_logger(__name__)
 
 REFUSAL_SENTINEL = "isn't available in the video transcript"
 VIDEO_NOT_INGESTED = "VIDEO_NOT_INGESTED"
+
+
+_CREATOR_KEYWORDS = frozenset({
+    # explicit creator references
+    "creator", "channel", "youtuber", "author",
+    # "who is …" in all common forms
+    "who is the", "who is this", "who is he", "who is she",
+    "who are they", "who are these", "who are the",
+    # how the creator was made / started
+    "who made", "who created", "who runs",
+    # pronouns pointing at the on-screen person
+    "this guy", "this person", "this dude", "this woman", "this man",
+    "the host", "the presenter", "the speaker",
+    # channel/career facts
+    "subscriber", "other videos", "other content",
+    "biography", "bio", "background", "famous", "known for",
+    "started", "their channel", "this channel", "about the channel",
+    "how many videos", "when did they", "their other",
+})
 
 
 class AskState(TypedDict):
@@ -32,6 +59,10 @@ class AskState(TypedDict):
     question: str
     history: list  # list[BaseMessage]; empty list = no history
     k: int
+    # ── Creator search ───────────────────────────────────────────────────────
+    is_creator_question: bool      # detected by detect_intent_node
+    channel_name: str | None       # resolved from stored metadata or oEmbed
+    creator_info: str | None       # web search snippets for the creator
     # ── Intermediate ────────────────────────────────────────────────────────
     retrieved_chunks: list[Document]
     max_retrieval_score: float | None  # highest _score among retrieved docs
@@ -55,6 +86,9 @@ def make_initial_state(
         "question": question,
         "history": history or [],
         "k": k,
+        "is_creator_question": False,
+        "channel_name": None,
+        "creator_info": None,
         "retrieved_chunks": [],
         "max_retrieval_score": None,
         "refused": False,
@@ -133,9 +167,48 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
             logger.exception("retrieve_node_failed", video_id=state["video_id"])
             return {"error": str(exc)}
 
+    def detect_intent_node(state: AskState) -> dict:
+        """Classify question as creator-related or video-content-related.
+
+        Uses keyword heuristics (no extra LLM call).  If creator intent is
+        detected, also resolves the channel name from stored metadata so the
+        subsequent creator_search_node can build a targeted query.
+        """
+        q = state["question"].lower()
+        is_creator = any(kw in q for kw in _CREATOR_KEYWORDS)
+
+        channel_name: str | None = None
+        if is_creator:
+            meta = get_channel_metadata(state["video_id"], vector_db_path)
+            channel_name = meta.get("channel_name") or None
+            logger.info(
+                "creator_intent_detected",
+                video_id=state["video_id"],
+                channel_name=channel_name,
+            )
+
+        return {"is_creator_question": is_creator, "channel_name": channel_name}
+
+    def creator_search_node(state: AskState) -> dict:
+        """Search the web for creator/channel info and return formatted snippets.
+
+        Falls back to the oEmbed API to resolve the channel name when it was
+        not stored during ingest (e.g. for videos ingested before this feature).
+        """
+        channel_name = state.get("channel_name") or ""
+        if not channel_name:
+            meta = fetch_video_metadata(state["video_id"])
+            channel_name = meta.get("channel_name", "")
+
+        if not channel_name:
+            logger.warning("creator_search_skipped_no_channel", video_id=state["video_id"])
+            return {"creator_info": None}
+
+        info = search_creator_info(channel_name, state["question"])
+        return {"creator_info": info or None}
+
     def guardrail_check_node(state: AskState) -> dict:  # noqa: ARG001
         """Routing-only node — checks if we have any chunks to work with."""
-        # Only check if we have chunks - LLM will decide if they're sufficient
         return {}
 
     def refuse_node(state: AskState) -> dict:  # noqa: ARG001
@@ -169,14 +242,20 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
                 context_budget_tokens,
             )
 
-            if not chunks:
+            creator_info = state.get("creator_info") or ""
+
+            if not chunks and not creator_info:
                 return {
                     "retrieved_chunks": [],
                     "refused": True,
                     "answer": "I'm sorry, that information isn't available in the video transcript.",
                 }
 
-            context = _format_context(chunks)
+            context = _format_context(chunks) if chunks else ""
+            if creator_info:
+                separator = "\n\n" if context else ""
+                context += f"{separator}[Creator/Channel Information from web search]\n{creator_info}"
+
             prompt_value = prompt_template.invoke(
                 {"context": context, "question": state["question"], "history": history}
             )
@@ -227,25 +306,25 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
         return END if state.get("error") else "retrieve"
 
     def route_after_retrieve(state: AskState) -> str:
-        return END if state.get("error") else "guardrail_check"
+        return END if state.get("error") else "detect_intent"
+
+    def route_after_detect_intent(state: AskState) -> str:
+        return "creator_search" if state.get("is_creator_question") else "guardrail_check"
 
     def route_after_generate(state: AskState) -> str:
         return END if state.get("error") else "format_response"
 
     def route_after_guardrail(state: AskState) -> str:
-        """Route based on whether we have any chunks - LLM will decide if sufficient."""
         chunks = state.get("retrieved_chunks") or []
-        # Only refuse if we have NO chunks at all
-        # If we have chunks, let the LLM decide if the context is sufficient
-        if not chunks:
-            return "refuse"
-        return "generate"
+        return "refuse" if not chunks else "generate"
 
     # ── Graph assembly ────────────────────────────────────────────────────────
 
     g = StateGraph(AskState)
     g.add_node("validate", validate_node)
     g.add_node("retrieve", retrieve_node)
+    g.add_node("detect_intent", detect_intent_node)
+    g.add_node("creator_search", creator_search_node)
     g.add_node("guardrail_check", guardrail_check_node)
     g.add_node("refuse", refuse_node)
     g.add_node("generate", generate_node)
@@ -260,8 +339,15 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
     g.add_conditional_edges(
         "retrieve",
         route_after_retrieve,
-        {END: END, "guardrail_check": "guardrail_check"},
+        {END: END, "detect_intent": "detect_intent"},
     )
+    g.add_conditional_edges(
+        "detect_intent",
+        route_after_detect_intent,
+        {"creator_search": "creator_search", "guardrail_check": "guardrail_check"},
+    )
+    # Creator search always proceeds to generate (web results are the context).
+    g.add_edge("creator_search", "generate")
     g.add_conditional_edges(
         "guardrail_check",
         route_after_guardrail,
