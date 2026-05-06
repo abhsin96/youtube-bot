@@ -333,7 +333,7 @@ class TestGuardrailScoreBased:
     def test_low_score_refuses_without_openai_call(
         self, MockLLM, mock_br, _mock_ce, settings, embeddings
     ):
-        """Docs returned but max _score < threshold → refuse; OpenAI never called."""
+        """Docs returned but max _score < threshold → LLM decides to refuse based on insufficient context."""
         doc = _doc()
         doc.metadata["_score"] = 0.05  # below threshold
         mock_retriever = MagicMock()
@@ -341,13 +341,21 @@ class TestGuardrailScoreBased:
         mock_br.return_value = mock_retriever
         settings.min_similarity_threshold = 0.5
 
+        # Mock LLM to return a refusal message (simulating LLM deciding context is insufficient)
+        mock_llm_instance = MockLLM.return_value
+        mock_response = MagicMock()
+        mock_response.content = (
+            "I'm sorry, that information isn't available in the video transcript."
+        )
+        mock_llm_instance.invoke.return_value = mock_response
+
         graph = build_ask_graph(settings, embeddings)
         result = graph.invoke(make_initial_state("vid1", "q?"))
 
-        assert result["refused"] is True
+        # With LLM-based guardrail, the LLM is called and decides based on context quality
         assert "isn't available" in result["answer"]
-        assert result["citations"] == []
-        MockLLM.return_value.invoke.assert_not_called()
+        # LLM should be called now (unlike the old threshold-based approach)
+        MockLLM.return_value.invoke.assert_called()
 
     @patch("graphs.ask_graph.collection_exists", return_value=True)
     @patch("graphs.ask_graph.build_retriever")

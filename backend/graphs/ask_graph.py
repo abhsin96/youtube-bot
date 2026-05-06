@@ -108,14 +108,15 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
         return {"error": None}
 
     def retrieve_node(state: AskState) -> dict:
-        """Fetch the top-k relevant chunks from the vector store."""
+        """Fetch the top-k relevant chunks from the vector store (no threshold filtering)."""
         try:
+            # Remove score_threshold to get top-k results regardless of score
             retriever = build_retriever(
                 state["video_id"],
                 embeddings,
                 vector_db_path,
                 k=state.get("k", 5),
-                score_threshold=score_threshold,
+                score_threshold=0.0,  # No threshold - let LLM decide if answerable
             )
             chunks = retriever.invoke(state["question"])
             max_score: float | None = (
@@ -133,7 +134,8 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
             return {"error": str(exc)}
 
     def guardrail_check_node(state: AskState) -> dict:  # noqa: ARG001
-        """Routing-only node — no state mutations."""
+        """Routing-only node — checks if we have any chunks to work with."""
+        # Only check if we have chunks - LLM will decide if they're sufficient
         return {}
 
     def refuse_node(state: AskState) -> dict:  # noqa: ARG001
@@ -231,9 +233,11 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
         return END if state.get("error") else "format_response"
 
     def route_after_guardrail(state: AskState) -> str:
+        """Route based on whether we have any chunks - LLM will decide if sufficient."""
         chunks = state.get("retrieved_chunks") or []
-        max_score = state.get("max_retrieval_score")
-        if not chunks or (max_score is not None and max_score < score_threshold):
+        # Only refuse if we have NO chunks at all
+        # If we have chunks, let the LLM decide if the context is sufficient
+        if not chunks:
             return "refuse"
         return "generate"
 
