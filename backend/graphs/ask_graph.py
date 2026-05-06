@@ -45,6 +45,11 @@ _CREATOR_KEYWORDS = frozenset({
     # pronouns pointing at the on-screen person
     "this guy", "this person", "this dude", "this woman", "this man",
     "the host", "the presenter", "the speaker",
+    # social media & contact
+    "instagram", "insta", "twitter", "tiktok", "facebook", "snapchat",
+    "twitch", "linkedin", "social media", "social handle",
+    "contact", "email", "reach out", "get in touch",
+    "handle", "username", "account", "profile",
     # channel/career facts
     "subscriber", "other videos", "other content",
     "biography", "bio", "background", "famous", "known for",
