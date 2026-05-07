@@ -15,6 +15,7 @@ tiktoken
 pydantic-settings
 tenacity
 keyring
+slowapi
 pytest
 pytest-asyncio
 httpx

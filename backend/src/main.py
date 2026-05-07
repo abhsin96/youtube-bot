@@ -10,10 +10,13 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langsmith import traceable, uuid7
 from pydantic import BaseModel, Field
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from graphs.ask_graph import (
@@ -247,10 +250,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     configure_logging(settings.log_level, json_logs=settings.json_logs)
 
+    limiter = Limiter(key_func=get_remote_address)
+
     app = FastAPI(title="youtube-extention", lifespan=lifespan)
     app.state.settings = settings
     app.state.ask_graph_cache = {"key_hash": None, "graph": None}
+    app.state.limiter = limiter
 
+    async def _rate_limit_handler(_request: Request, _exc: RateLimitExceeded) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "Rate limit exceeded. Try again later.",
+                }
+            },
+        )
+
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
     app.add_exception_handler(AppError, app_error_handler)
     # Register for both the Starlette base class (raised by the router, e.g. 405)
     # and FastAPI's subclass so all HTTP errors go through our envelope.
@@ -284,7 +302,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- /config routes ---
 
     @app.post("/config/api-key", status_code=204)
-    async def config_set_api_key(body: ApiKeyRequest):
+    @limiter.limit("5/minute")
+    async def config_set_api_key(request: Request, body: ApiKeyRequest):
         set_api_key(body.api_key)
 
     @app.delete("/config/api-key", status_code=204)
@@ -299,7 +318,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- /ingest ---
 
     @app.post("/ingest", response_model=IngestResponse)
-    async def ingest(body: IngestRequest):
+    @limiter.limit("10/minute")
+    async def ingest(request: Request, body: IngestRequest):
         s: Settings = app.state.settings
         key = _resolve_key(s)
         embeddings = get_embeddings(s, api_key=key)
@@ -336,7 +356,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- /query endpoint ---
 
     @app.post("/query")
-    async def query(body: QueryRequest, request: Request):
+    @limiter.limit("30/minute")
+    async def query(request: Request, body: QueryRequest):
         """Unified Q&A endpoint with streaming and advanced mode support.
 
         Flags:

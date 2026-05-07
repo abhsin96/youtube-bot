@@ -236,3 +236,32 @@ def test_ingest_route_passes_video_id_kwarg(client):
     with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
         client.post("/ingest", json={"video_id": "my-vid"})
     assert mock_fn.call_args.kwargs["video_id"] == "my-vid"
+
+
+# --- Rate limiting ---
+
+
+def test_ingest_rate_limit_returns_429_after_10_requests():
+    settings = Settings(openai_api_key="sk-test", _env_file=None)
+    c = TestClient(create_app(settings))
+    with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE):
+        for _ in range(10):
+            resp = c.post("/ingest", json={"video_id": "vid1"})
+            assert resp.status_code == 200
+        resp = c.post("/ingest", json={"video_id": "vid1"})
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["error"]["code"] == "RATE_LIMITED"
+
+
+def test_config_api_key_rate_limit_returns_429_after_5_requests():
+    settings = Settings(openai_api_key="sk-test", _env_file=None)
+    c = TestClient(create_app(settings))
+    with patch("src.main.set_api_key"):
+        for _ in range(5):
+            resp = c.post("/config/api-key", json={"api_key": "sk-test"})
+            assert resp.status_code == 204
+        resp = c.post("/config/api-key", json={"api_key": "sk-test"})
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["error"]["code"] == "RATE_LIMITED"
