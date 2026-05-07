@@ -268,6 +268,37 @@ class TestConversationHistory:
 
 
 # ---------------------------------------------------------------------------
+# Ask graph caching
+# ---------------------------------------------------------------------------
+
+
+class TestGraphCaching:
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_graph_built_once_for_same_key(self, _mock_emb, mock_build, client):
+        """build_ask_graph is called only once when successive requests share the same key."""
+        mock_build.return_value.invoke.return_value = _graph_result()
+        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        assert mock_build.call_count == 1
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    @patch("src.main.get_openai_key")
+    def test_graph_rebuilt_when_api_key_changes(self, mock_get_key, _mock_emb, mock_build, client):
+        """build_ask_graph is called again after the API key is rotated."""
+        mock_build.return_value.invoke.return_value = _graph_result()
+
+        mock_get_key.return_value = "sk-key-a"
+        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        assert mock_build.call_count == 1
+
+        mock_get_key.return_value = "sk-key-b"
+        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        assert mock_build.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # POST /ask/stream
 # ---------------------------------------------------------------------------
 

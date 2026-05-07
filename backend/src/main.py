@@ -1,3 +1,4 @@
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -82,6 +83,26 @@ def _run_ask_graph(graph, state: AskState, *, video_id: str, thread_id: str | No
 def _run_answer_question(*args, **kwargs):
     """Bridge for running answer_question in a threadpool with tracing."""
     return answer_question(*args, **kwargs)
+
+
+def _get_or_rebuild_ask_graph(app: FastAPI, settings: Settings, key: str, emb):
+    """Return the cached compiled ask graph, rebuilding when the API key changes.
+
+    The graph is compiled once per unique API key and stored in app.state so
+    the expensive LangGraph compilation only runs on the first request (or after
+    a key rotation via /config/api-key).  The raw key is never stored — only a
+    short hex digest used for change detection.
+    """
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    cache = app.state.ask_graph_cache
+    if cache["key_hash"] != key_hash:
+        logger.info(
+            "building ask graph",
+            reason="api_key_changed" if cache["key_hash"] else "first_build",
+        )
+        cache["graph"] = build_ask_graph(settings, emb, api_key=key)
+        cache["key_hash"] = key_hash
+    return cache["graph"]
 
 
 @asynccontextmanager
@@ -211,6 +232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="youtube-extention", lifespan=lifespan)
     app.state.settings = settings
+    app.state.ask_graph_cache = {"key_hash": None, "graph": None}
 
     app.add_exception_handler(AppError, app_error_handler)
     # Register for both the Starlette base class (raised by the router, e.g. 405)
@@ -339,7 +361,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         s: Settings = app.state.settings
         key = _resolve_key(s)
         emb = get_embeddings(s, api_key=key)
-        graph = build_ask_graph(s, emb, api_key=key)
+        graph = _get_or_rebuild_ask_graph(app, s, key, emb)
 
         # Generate or use provided thread_id for conversation tracking
         thread_id = body.thread_id or str(uuid7())
@@ -533,7 +555,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str, request: Request
     ) -> AskResponse:
         """Advanced Q&A with LangGraph pipeline and guardrails."""
-        graph = build_ask_graph(s, emb, api_key=key)
+        graph = _get_or_rebuild_ask_graph(app, s, key, emb)
 
         state = make_initial_state(
             video_id=body.video_id,
