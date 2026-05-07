@@ -62,7 +62,7 @@ class TestErrorEnvelopeShape:
     @patch("src.main.get_embeddings")
     def test_404_video_not_ingested_envelope(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_error(VIDEO_NOT_INGESTED)
-        resp = client.post("/ask", json={"video_id": "missing", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "missing", "question": "q?"})
 
         assert resp.status_code == 404
         err = _assert_envelope(resp.json())
@@ -72,7 +72,7 @@ class TestErrorEnvelopeShape:
     @patch("src.main.get_embeddings")
     def test_500_internal_error_envelope(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_error("something went wrong")
-        resp = client.post("/ask", json={"video_id": "vid1", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?"})
 
         assert resp.status_code == 500
         err = _assert_envelope(resp.json())
@@ -96,7 +96,7 @@ class TestErrorEnvelopeShape:
 
     def test_422_validation_error_envelope(self, client):
         # Missing required field 'question'
-        resp = client.post("/ask", json={"video_id": "vid1"})
+        resp = client.post("/query", json={"video_id": "vid1"})
 
         assert resp.status_code == 422
         err = _assert_envelope(resp.json())
@@ -105,14 +105,14 @@ class TestErrorEnvelopeShape:
     @patch("src.main.collection_exists", return_value=False)
     @patch("src.main.get_embeddings")
     def test_stream_404_envelope(self, _mock_emb, _mock_ce, client):
-        resp = client.post("/ask/stream", json={"video_id": "missing", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "missing", "question": "q?", "stream": True})
 
         assert resp.status_code == 404
         err = _assert_envelope(resp.json())
         assert err["code"] == "VIDEO_NOT_INGESTED"
 
     def test_405_method_not_allowed_envelope(self, client):
-        resp = client.get("/ask")
+        resp = client.get("/query")
 
         assert resp.status_code == 405
         err = _assert_envelope(resp.json())
@@ -155,33 +155,6 @@ class TestGlobalExceptionHandler:
 
 
 # ---------------------------------------------------------------------------
-# /chat endpoint — answer_question() exceptions produce 500 envelope
-# ---------------------------------------------------------------------------
-
-
-class TestChatEndpointErrors:
-    @patch("src.main.get_embeddings")
-    @patch("src.main.answer_question")
-    def test_answer_question_exception_returns_500_envelope(self, mock_aq, _mock_emb, client):
-        mock_aq.side_effect = RuntimeError("embedding store down")
-        resp = client.post("/chat/vid1", json={"question": "q?"})
-
-        assert resp.status_code == 500
-        err = _assert_envelope(resp.json())
-        assert err["code"] == "INTERNAL_ERROR"
-
-    @patch("src.main.get_embeddings")
-    @patch("src.main.answer_question")
-    def test_answer_question_exception_message_is_generic(self, mock_aq, _mock_emb, client):
-        """Internal detail from answer_question must not appear in the response."""
-        secret = "connection-string-secret-789"
-        mock_aq.side_effect = RuntimeError(secret)
-        resp = client.post("/chat/vid1", json={"question": "q?"})
-
-        assert secret not in resp.text
-
-
-# ---------------------------------------------------------------------------
 # CORS — chrome-extension origin
 # ---------------------------------------------------------------------------
 
@@ -195,7 +168,7 @@ class TestCORSExtensionOrigin:
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.options(
-            "/ask",
+            "/query",
             headers={
                 "Origin": self.EXT_ORIGIN,
                 "Access-Control-Request-Method": "POST",

@@ -179,18 +179,18 @@ class TestConfigEndpoints:
 
 
 # ---------------------------------------------------------------------------
-# /ask returns 400 when no key is configured
+# /query returns 400 when no key is configured
 # ---------------------------------------------------------------------------
 
 
 class TestMissingKeyReturns400:
-    def test_ask_400_when_no_key(self, client):
-        resp = client.post("/ask", json={"video_id": "vid1", "question": "q?"})
+    def test_query_400_when_no_key(self, client):
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?"})
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "API_KEY_MISSING"
 
-    def test_ask_stream_400_when_no_key(self, client):
-        resp = client.post("/ask/stream", json={"video_id": "vid1", "question": "q?"})
+    def test_query_stream_400_when_no_key(self, client):
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?", "stream": True})
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "API_KEY_MISSING"
 

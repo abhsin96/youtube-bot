@@ -6,12 +6,11 @@ fixture_data.py in a fresh temp directory per test.
 
 Coverage
 --------
-- POST /ask  happy path: answer + citations returned
-- POST /ask  conversation history flows through to the graph
-- POST /ask  unknown video → 404 VIDEO_NOT_INGESTED
-- POST /ask/stream  emits token + done events
+- POST /query  happy path: answer + citations returned
+- POST /query  conversation history flows through to the graph
+- POST /query  unknown video → 404 VIDEO_NOT_INGESTED
+- POST /query (stream=true)  emits token + done events
 - POST /ingest  full pipeline (mocked transcript + mock embeddings)
-- POST /ask  returns INTERNAL_ERROR when graph node fails
 """
 
 from __future__ import annotations
@@ -26,15 +25,15 @@ from tests.e2e.fixture_data import FIXTURE_SEGMENTS, FIXTURE_VIDEO_ID
 from tests.mock_openai.server import register_response
 
 # ---------------------------------------------------------------------------
-# /ask — happy path
+# /query — happy path
 # ---------------------------------------------------------------------------
 
 
-class TestAskE2E:
-    def test_ask_returns_200_with_answer_and_citations(self, e2e_client: TestClient):
+class TestQueryE2E:
+    def test_query_returns_200_with_answer_and_citations(self, e2e_client: TestClient):
         register_response("list comprehension", "A list comprehension creates a list in one line.")
         resp = e2e_client.post(
-            "/ask",
+            "/query",
             json={"video_id": FIXTURE_VIDEO_ID, "question": "What is a list comprehension?"},
         )
         assert resp.status_code == 200
@@ -43,9 +42,9 @@ class TestAskE2E:
         assert isinstance(body["citations"], list)
         assert isinstance(body["refused"], bool)
 
-    def test_ask_citations_have_required_fields(self, e2e_client: TestClient):
+    def test_query_citations_have_required_fields(self, e2e_client: TestClient):
         resp = e2e_client.post(
-            "/ask",
+            "/query",
             json={"video_id": FIXTURE_VIDEO_ID, "question": "What is a lambda function?"},
         )
         assert resp.status_code == 200
@@ -55,27 +54,27 @@ class TestAskE2E:
             assert "end_ts" in cit
             assert "text" in cit
 
-    def test_ask_registered_answer_is_returned(self, e2e_client: TestClient):
+    def test_query_registered_answer_is_returned(self, e2e_client: TestClient):
         register_response("decorator", "Decorators wrap a function using the @ symbol.")
         resp = e2e_client.post(
-            "/ask",
+            "/query",
             json={"video_id": FIXTURE_VIDEO_ID, "question": "How do decorators work?"},
         )
         assert resp.status_code == 200
         assert "Decorators wrap" in resp.json()["answer"]
 
-    def test_ask_unknown_video_returns_404(self, e2e_client: TestClient):
+    def test_query_unknown_video_returns_404(self, e2e_client: TestClient):
         resp = e2e_client.post(
-            "/ask",
+            "/query",
             json={"video_id": "not_a_real_video_id", "question": "anything?"},
         )
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
-    def test_ask_with_conversation_history(self, e2e_client: TestClient):
+    def test_query_with_conversation_history(self, e2e_client: TestClient):
         register_response("context manager", "Context managers use the with statement.")
         resp = e2e_client.post(
-            "/ask",
+            "/query",
             json={
                 "video_id": FIXTURE_VIDEO_ID,
                 "question": "Can you give an example?",
@@ -91,9 +90,9 @@ class TestAskE2E:
         assert resp.status_code == 200
         assert resp.json()["answer"]
 
-    def test_ask_tokens_used_is_int_or_none(self, e2e_client: TestClient):
+    def test_query_tokens_used_is_int_or_none(self, e2e_client: TestClient):
         resp = e2e_client.post(
-            "/ask",
+            "/query",
             json={"video_id": FIXTURE_VIDEO_ID, "question": "What are f-strings?"},
         )
         assert resp.status_code == 200
@@ -102,7 +101,7 @@ class TestAskE2E:
 
 
 # ---------------------------------------------------------------------------
-# /ask/stream — happy path
+# /query (stream=true) — happy path
 # ---------------------------------------------------------------------------
 
 
@@ -115,11 +114,11 @@ def _parse_sse(body: str) -> list[dict]:
     return events
 
 
-class TestAskStreamE2E:
+class TestQueryStreamE2E:
     def test_stream_returns_200_with_sse_content_type(self, e2e_client: TestClient):
         resp = e2e_client.post(
-            "/ask/stream",
-            json={"video_id": FIXTURE_VIDEO_ID, "question": "What are generators?"},
+            "/query",
+            json={"video_id": FIXTURE_VIDEO_ID, "question": "What are generators?", "stream": True},
         )
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers["content-type"]
@@ -127,8 +126,12 @@ class TestAskStreamE2E:
     def test_stream_emits_done_event(self, e2e_client: TestClient):
         register_response("generator", "Generator expressions create lazy sequences.")
         resp = e2e_client.post(
-            "/ask/stream",
-            json={"video_id": FIXTURE_VIDEO_ID, "question": "Explain generator expressions."},
+            "/query",
+            json={
+                "video_id": FIXTURE_VIDEO_ID,
+                "question": "Explain generator expressions.",
+                "stream": True,
+            },
         )
         events = _parse_sse(resp.text)
         types = {e.get("type") for e in events}
@@ -136,8 +139,8 @@ class TestAskStreamE2E:
 
     def test_stream_done_event_has_answer_and_citations(self, e2e_client: TestClient):
         resp = e2e_client.post(
-            "/ask/stream",
-            json={"video_id": FIXTURE_VIDEO_ID, "question": "What is unpacking?"},
+            "/query",
+            json={"video_id": FIXTURE_VIDEO_ID, "question": "What is unpacking?", "stream": True},
         )
         events = _parse_sse(resp.text)
         done = next(e for e in events if e.get("type") == "done")
@@ -148,8 +151,12 @@ class TestAskStreamE2E:
     def test_stream_token_events_emitted(self, e2e_client: TestClient):
         register_response("type hint", "Type hints use the colon syntax for parameters.")
         resp = e2e_client.post(
-            "/ask/stream",
-            json={"video_id": FIXTURE_VIDEO_ID, "question": "What are type hints?"},
+            "/query",
+            json={
+                "video_id": FIXTURE_VIDEO_ID,
+                "question": "What are type hints?",
+                "stream": True,
+            },
         )
         events = _parse_sse(resp.text)
         token_events = [e for e in events if e.get("type") == "token"]
@@ -157,8 +164,8 @@ class TestAskStreamE2E:
 
     def test_stream_unknown_video_returns_404(self, e2e_client: TestClient):
         resp = e2e_client.post(
-            "/ask/stream",
-            json={"video_id": "nonexistent_xyz", "question": "q?"},
+            "/query",
+            json={"video_id": "nonexistent_xyz", "question": "q?", "stream": True},
         )
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"

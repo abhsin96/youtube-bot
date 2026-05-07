@@ -1,4 +1,4 @@
-"""Integration tests for POST /ask and POST /ask/stream.
+"""Integration tests for POST /query (non-streaming and streaming modes).
 
 All external I/O (vector store, LLM) is mocked; only the HTTP layer and
 request/response shapes are exercised end-to-end against a real FastAPI app.
@@ -50,23 +50,23 @@ def _graph_result(
 
 
 # ---------------------------------------------------------------------------
-# POST /ask
+# POST /query (advanced mode, non-streaming)
 # ---------------------------------------------------------------------------
 
 
-class TestAskEndpoint:
+class TestQueryEndpoint:
     @patch("src.main.build_ask_graph")
     @patch("src.main.get_embeddings")
     def test_happy_path_returns_200(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result()
-        resp = client.post("/ask", json={"video_id": "vid1", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?"})
         assert resp.status_code == 200
 
     @patch("src.main.build_ask_graph")
     @patch("src.main.get_embeddings")
     def test_happy_path_response_shape(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result()
-        data = client.post("/ask", json={"video_id": "vid1", "question": "q?"}).json()
+        data = client.post("/query", json={"video_id": "vid1", "question": "q?"}).json()
 
         assert data["answer"] == "The answer is 42."
         assert data["tokens_used"] == 150
@@ -86,7 +86,7 @@ class TestAskEndpoint:
             {"chunk_id": "c2", "start_ts": 20.0, "end_ts": 30.0, "text": "chunk two"},
         ]
         mock_build.return_value.invoke.return_value = _graph_result(citations=all_citations)
-        data = client.post("/ask", json={"video_id": "vid1", "question": "q?"}).json()
+        data = client.post("/query", json={"video_id": "vid1", "question": "q?"}).json()
 
         returned_ids = {c["chunk_id"] for c in data["citations"]}
         all_ids = {"c1", "c2"}
@@ -98,7 +98,7 @@ class TestAskEndpoint:
         mock_build.return_value.invoke.return_value = _graph_result(
             answer="", citations=[], tokens_used=None, error=VIDEO_NOT_INGESTED
         )
-        resp = client.post("/ask", json={"video_id": "missing", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "missing", "question": "q?"})
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
@@ -111,7 +111,7 @@ class TestAskEndpoint:
             tokens_used=None,
             refused=True,
         )
-        data = client.post("/ask", json={"video_id": "vid1", "question": "q?"}).json()
+        data = client.post("/query", json={"video_id": "vid1", "question": "q?"}).json()
         assert data["refused"] is True
         assert data["citations"] == []
         assert "isn't available" in data["answer"]
@@ -126,7 +126,7 @@ class TestAskEndpoint:
         history = [{"role": "user", "content": "prior question"}]
 
         client.post(
-            "/ask",
+            "/query",
             json={"video_id": "vid1", "question": "follow up?", "conversation_history": history},
         )
 
@@ -141,7 +141,7 @@ class TestAskEndpoint:
         mock_graph = mock_build.return_value
         mock_graph.invoke.return_value = _graph_result()
 
-        client.post("/ask", json={"video_id": "vid1", "question": "q?", "k": 3})
+        client.post("/query", json={"video_id": "vid1", "question": "q?", "k": 3})
 
         call_state = mock_graph.invoke.call_args[0][0]
         assert call_state["k"] == 3
@@ -150,7 +150,7 @@ class TestAskEndpoint:
     @patch("src.main.get_embeddings")
     def test_tokens_used_none_is_allowed(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result(tokens_used=None)
-        data = client.post("/ask", json={"video_id": "vid1", "question": "q?"}).json()
+        data = client.post("/query", json={"video_id": "vid1", "question": "q?"}).json()
         assert data["tokens_used"] is None
 
 
@@ -164,7 +164,7 @@ class TestConversationHistory:
     @patch("src.main.get_embeddings")
     def test_invalid_role_returns_422(self, _mock_emb, _mock_build, client):
         resp = client.post(
-            "/ask",
+            "/query",
             json={
                 "video_id": "vid1",
                 "question": "q?",
@@ -182,7 +182,7 @@ class TestConversationHistory:
         mock_graph.invoke.return_value = _graph_result()
 
         client.post(
-            "/ask",
+            "/query",
             json={
                 "video_id": "vid1",
                 "question": "q?",
@@ -203,7 +203,7 @@ class TestConversationHistory:
         mock_graph.invoke.return_value = _graph_result()
 
         client.post(
-            "/ask",
+            "/query",
             json={
                 "video_id": "vid1",
                 "question": "q?",
@@ -229,7 +229,7 @@ class TestConversationHistory:
         ]
 
         client.post(
-            "/ask",
+            "/query",
             json={"video_id": "vid1", "question": "q?", "conversation_history": turns},
         )
 
@@ -246,7 +246,7 @@ class TestConversationHistory:
         turns = [{"role": "user", "content": f"msg {i}"} for i in range(30)]
 
         client.post(
-            "/ask",
+            "/query",
             json={"video_id": "vid1", "question": "q?", "conversation_history": turns},
         )
 
@@ -261,7 +261,7 @@ class TestConversationHistory:
         mock_graph = mock_build.return_value
         mock_graph.invoke.return_value = _graph_result()
 
-        client.post("/ask", json={"video_id": "vid1", "question": "q?"})
+        client.post("/query", json={"video_id": "vid1", "question": "q?"})
 
         history = mock_graph.invoke.call_args[0][0]["history"]
         assert history == []
@@ -278,8 +278,8 @@ class TestGraphCaching:
     def test_graph_built_once_for_same_key(self, _mock_emb, mock_build, client):
         """build_ask_graph is called only once when successive requests share the same key."""
         mock_build.return_value.invoke.return_value = _graph_result()
-        client.post("/ask", json={"video_id": "v", "question": "q?"})
-        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        client.post("/query", json={"video_id": "v", "question": "q?"})
+        client.post("/query", json={"video_id": "v", "question": "q?"})
         assert mock_build.call_count == 1
 
     @patch("src.main.build_ask_graph")
@@ -290,24 +290,24 @@ class TestGraphCaching:
         mock_build.return_value.invoke.return_value = _graph_result()
 
         mock_get_key.return_value = "sk-key-a"
-        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        client.post("/query", json={"video_id": "v", "question": "q?"})
         assert mock_build.call_count == 1
 
         mock_get_key.return_value = "sk-key-b"
-        client.post("/ask", json={"video_id": "v", "question": "q?"})
+        client.post("/query", json={"video_id": "v", "question": "q?"})
         assert mock_build.call_count == 2
 
 
 # ---------------------------------------------------------------------------
-# POST /ask/stream
+# POST /query?stream=true  (streaming mode)
 # ---------------------------------------------------------------------------
 
 
-class TestAskStreamEndpoint:
+class TestQueryStreamEndpoint:
     @patch("src.main.collection_exists", return_value=False)
     @patch("src.main.get_embeddings")
     def test_not_ingested_returns_404(self, _mock_emb, _mock_ce, client):
-        resp = client.post("/ask/stream", json={"video_id": "missing", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "missing", "question": "q?", "stream": True})
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
@@ -319,7 +319,7 @@ class TestAskStreamEndpoint:
         mock_retriever.invoke.return_value = []
         mock_br.return_value = mock_retriever
 
-        resp = client.post("/ask/stream", json={"video_id": "vid1", "question": "q?"})
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?", "stream": True})
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers["content-type"]
 
@@ -354,7 +354,9 @@ class TestAskStreamEndpoint:
                 yield chunk
 
         with patch.object(ChatOpenAI, "_astream", fake_astream):
-            resp = client.post("/ask/stream", json={"video_id": "vid1", "question": "q?"})
+            resp = client.post(
+                "/query", json={"video_id": "vid1", "question": "q?", "stream": True}
+            )
 
         assert resp.status_code == 200
         events = _parse_sse(resp.text)
@@ -392,7 +394,9 @@ class TestAskStreamEndpoint:
             yield chunk
 
         with patch.object(ChatOpenAI, "_astream", fake_astream):
-            resp = client.post("/ask/stream", json={"video_id": "vid1", "question": "q?"})
+            resp = client.post(
+                "/query", json={"video_id": "vid1", "question": "q?", "stream": True}
+            )
 
         events = _parse_sse(resp.text)
         done = next(e for e in events if e["type"] == "done")
@@ -421,7 +425,9 @@ class TestAskStreamEndpoint:
             yield  # pragma: no cover — makes this an async generator
 
         with patch.object(ChatOpenAI, "_astream", raising_astream):
-            resp = client.post("/ask/stream", json={"video_id": "vid1", "question": "q?"})
+            resp = client.post(
+                "/query", json={"video_id": "vid1", "question": "q?", "stream": True}
+            )
 
         assert resp.status_code == 200
         events = _parse_sse(resp.text)

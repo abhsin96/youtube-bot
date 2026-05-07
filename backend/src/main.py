@@ -97,7 +97,7 @@ async def _stream_answer(
     thread_id: str,
     endpoint: str,
 ) -> AsyncIterator[str]:
-    """Shared SSE token-stream generator for /ask/stream and /query?stream=true.
+    """SSE token-stream generator for /query?stream=true.
 
     Callers must validate that the collection exists and raise HTTP errors
     *before* iterating this generator — any error raised here arrives after
@@ -206,11 +206,6 @@ class IngestResponse(BaseModel):
     cached: bool
 
 
-class QuestionRequest(BaseModel):
-    question: str
-    k: int = 5
-
-
 class QuestionResponse(BaseModel):
     answer: str
     sources: list[dict]
@@ -219,16 +214,6 @@ class QuestionResponse(BaseModel):
 class ConversationTurn(BaseModel):
     role: Literal["user", "assistant"] = Field(..., description="Speaker role")
     content: str = Field(..., min_length=1, description="Message text")
-
-
-class AskRequest(BaseModel):
-    video_id: str = Field(..., min_length=1, description="YouTube video ID")
-    question: str = Field(..., min_length=1, description="Question about the video")
-    conversation_history: list[ConversationTurn] = Field(
-        default_factory=list, description="Prior turn messages"
-    )
-    k: int = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
-    thread_id: str | None = Field(None, description="Thread ID for conversation tracking")
 
 
 class QueryRequest(BaseModel):
@@ -395,112 +380,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cached=traced["status"] == "skipped",
         )
 
-    @app.post("/chat/{video_id}", response_model=QuestionResponse)
-    @traceable(name="Chat Bot", metadata={"endpoint": "/chat"})
-    async def chat(video_id: str, body: QuestionRequest, request: Request):
-        s: Settings = app.state.settings
-        key = _resolve_key(s)
-        embeddings = get_embeddings(s, api_key=key)
-
-        # Use request ID as thread_id for tracing
-        thread_id = getattr(request.state, "request_id", None)
-
-        try:
-            result = await run_in_threadpool(
-                _run_answer_question,
-                video_id=video_id,
-                question=body.question,
-                embeddings=embeddings,
-                vector_db_path=s.vector_db_path,
-                chat_model=s.chat_model,
-                openai_api_key=key,
-                k=body.k,
-                score_threshold=s.min_similarity_threshold,
-                context_budget_tokens=s.context_budget_tokens,
-                openai_api_base=s.openai_api_base,
-            )
-        except Exception as exc:
-            logger.exception("chat_error", video_id=video_id, thread_id=thread_id)
-            raise AppError(500, "INTERNAL_ERROR", "An unexpected error occurred.") from exc
-        return QuestionResponse(
-            answer=result.answer,
-            sources=[
-                {
-                    "chunk_id": doc.metadata.get("chunk_id"),
-                    "start_ts": doc.metadata.get("start_ts"),
-                    "end_ts": doc.metadata.get("end_ts"),
-                    "text": doc.page_content,
-                }
-                for doc in result.sources
-            ],
-        )
-
-    @app.post("/ask", response_model=AskResponse)
-    async def ask(body: AskRequest, request: Request):
-        s: Settings = app.state.settings
-        key = _resolve_key(s)
-        emb = get_embeddings(s, api_key=key)
-        graph = _get_or_rebuild_ask_graph(app, s, key, emb)
-
-        # Generate or use provided thread_id for conversation tracking
-        thread_id = body.thread_id or str(uuid7())
-        logger.info("ask_started", video_id=body.video_id, thread_id=thread_id)
-
-        state = make_initial_state(
-            video_id=body.video_id,
-            question=body.question,
-            history=_to_langchain_history(body.conversation_history, s.max_history_turns),
-            k=body.k,
-        )
-
-        # Wrap the graph invocation with @traceable and thread metadata
-        @traceable(name="Chat Bot", metadata={"thread_id": thread_id, "endpoint": "/ask"})
-        def run_ask_with_thread():
-            return _run_ask_graph(graph, state, video_id=body.video_id, thread_id=thread_id)
-
-        result = await run_in_threadpool(run_ask_with_thread)
-
-        if result.get("error") == VIDEO_NOT_INGESTED:
-            raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
-        if result.get("error"):
-            raise AppError(500, "INTERNAL_ERROR", result["error"])
-
-        return AskResponse(
-            answer=result["answer"],
-            citations=result["citations"],
-            tokens_used=result.get("tokens_used"),
-            refused=result.get("refused", False),
-            thread_id=thread_id,
-        )
-
-    @app.post("/ask/stream")
-    async def ask_stream(body: AskRequest, request: Request):
-        s: Settings = app.state.settings
-        key = _resolve_key(s)
-        emb = get_embeddings(s, api_key=key)
-
-        thread_id = body.thread_id or str(uuid7())
-        logger.info("ask_stream_started", video_id=body.video_id, thread_id=thread_id)
-
-        if not collection_exists(body.video_id, s.vector_db_path):
-            raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
-
-        return StreamingResponse(
-            _stream_answer(
-                video_id=body.video_id,
-                question=body.question,
-                history=_to_langchain_history(body.conversation_history, s.max_history_turns),
-                k=body.k,
-                s=s,
-                key=key,
-                emb=emb,
-                thread_id=thread_id,
-                endpoint="/ask/stream",
-            ),
-            media_type="text/event-stream",
-        )
-
-    # --- Unified /query endpoint ---
+    # --- /query endpoint ---
 
     @app.post("/query")
     async def query(body: QueryRequest, request: Request):
