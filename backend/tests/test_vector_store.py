@@ -10,7 +10,9 @@ from src.vector_store import (
     add_documents,
     collection_exists,
     delete_collection,
+    get_channel_metadata,
     query,
+    save_channel_metadata,
 )
 
 # ---------------------------------------------------------------------------
@@ -319,3 +321,58 @@ def test_two_video_ids_persist_independently(tmp_db):
     assert collection_exists("persist-b", tmp_db)
     results = query("persist-a", [0.0] * _DIM, emb, tmp_db, k=2)
     assert len(results) > 0
+
+
+# ---------------------------------------------------------------------------
+# Channel metadata — stored in Chroma collection metadata
+# ---------------------------------------------------------------------------
+
+
+def test_save_and_get_channel_metadata_roundtrip(tmp_db):
+    add_documents("vid1", _docs(1), _fake_embedding(), tmp_db)
+    meta = {
+        "channel_name": "Test Channel",
+        "channel_url": "https://example.com",
+        "title": "My Video",
+    }
+    save_channel_metadata("vid1", tmp_db, meta)
+    result = get_channel_metadata("vid1", tmp_db)
+    assert result == meta
+
+
+def test_get_channel_metadata_returns_empty_when_collection_absent(tmp_db):
+    result = get_channel_metadata("nonexistent", tmp_db)
+    assert result == {}
+
+
+def test_get_channel_metadata_filters_hnsw_keys(tmp_db):
+    add_documents("vid1", _docs(1), _fake_embedding(), tmp_db)
+    save_channel_metadata("vid1", tmp_db, {"channel_name": "Chan"})
+    result = get_channel_metadata("vid1", tmp_db)
+    assert all(not k.startswith("hnsw:") for k in result)
+
+
+def test_collection_still_queryable_after_save_channel_metadata(tmp_db):
+    emb = _fake_embedding()
+    add_documents("vid1", _docs(2), emb, tmp_db)
+    save_channel_metadata("vid1", tmp_db, {"channel_name": "Chan"})
+    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=2)
+    assert len(results) > 0
+
+
+def test_save_channel_metadata_overwrites_previous(tmp_db):
+    add_documents("vid1", _docs(1), _fake_embedding(), tmp_db)
+    save_channel_metadata("vid1", tmp_db, {"channel_name": "Old"})
+    save_channel_metadata("vid1", tmp_db, {"channel_name": "New"})
+    result = get_channel_metadata("vid1", tmp_db)
+    assert result["channel_name"] == "New"
+
+
+def test_channel_metadata_isolated_between_videos(tmp_db):
+    emb = _fake_embedding()
+    add_documents("vid-a", _docs(1), emb, tmp_db)
+    add_documents("vid-b", _docs(1), emb, tmp_db)
+    save_channel_metadata("vid-a", tmp_db, {"channel_name": "Alpha"})
+    save_channel_metadata("vid-b", tmp_db, {"channel_name": "Beta"})
+    assert get_channel_metadata("vid-a", tmp_db)["channel_name"] == "Alpha"
+    assert get_channel_metadata("vid-b", tmp_db)["channel_name"] == "Beta"

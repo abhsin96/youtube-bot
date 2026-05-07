@@ -1,4 +1,3 @@
-import json
 import re
 import uuid
 from pathlib import Path
@@ -151,29 +150,30 @@ def recreate_collection_with_correct_metric(video_id: str, persist_directory: st
 
 
 # ---------------------------------------------------------------------------
-# Channel metadata  (JSON sidecar alongside the Chroma DB directory)
+# Channel metadata  (stored in Chroma collection metadata)
 # ---------------------------------------------------------------------------
 
 
-def _metadata_path(video_id: str, persist_directory: str | Path) -> Path:
-    return Path(persist_directory) / f"{_sanitize_video_id(video_id)}_meta.json"
-
-
 def save_channel_metadata(video_id: str, persist_directory: str | Path, metadata: dict) -> None:
-    """Persist channel metadata (title, channel_name, channel_url) to disk."""
-    path = _metadata_path(video_id, persist_directory)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(metadata, ensure_ascii=False))
+    """Persist channel metadata (title, channel_name, channel_url) in the Chroma collection."""
+    client = _get_client(persist_directory)
+    name = _collection_name(video_id)
+    collection = client.get_collection(name)
+    existing = collection.metadata or {}
+    # hnsw:* keys are set at creation time; modify() rejects them even unchanged
+    non_hnsw = {k: v for k, v in existing.items() if not k.startswith("hnsw:")}
+    collection.modify(metadata={**non_hnsw, **metadata})
     logger.info("channel_metadata_saved", video_id=video_id, channel=metadata.get("channel_name"))
 
 
 def get_channel_metadata(video_id: str, persist_directory: str | Path) -> dict:
     """Return saved channel metadata, or an empty dict if not yet stored."""
-    path = _metadata_path(video_id, persist_directory)
-    if not path.exists():
-        return {}
+    client = _get_client(persist_directory)
+    name = _collection_name(video_id)
     try:
-        return json.loads(path.read_text())
+        collection = client.get_collection(name)
+        meta = collection.metadata or {}
+        return {k: v for k, v in meta.items() if not k.startswith("hnsw:")}
     except Exception as exc:
         logger.warning("channel_metadata_read_failed", video_id=video_id, error=str(exc))
         return {}
