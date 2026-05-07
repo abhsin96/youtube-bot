@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import chromadb
 import pytest
 
 from src.ingestion import IngestionResult, ingest_video
@@ -22,7 +23,12 @@ def _fake_embeddings(dim: int = _DIM):
 
 @pytest.fixture()
 def tmp_db(tmp_path):
-    return tmp_path / "chroma"
+    from chromadb.config import Settings as ChromaSettings
+
+    return chromadb.PersistentClient(
+        path=str(tmp_path / "chroma"),
+        settings=ChromaSettings(anonymized_telemetry=False),
+    )
 
 
 # --- happy path ---

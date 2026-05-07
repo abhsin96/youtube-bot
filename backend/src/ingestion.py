@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import chromadb
 import structlog
 from langchain_core.embeddings import Embeddings
 
@@ -22,7 +23,7 @@ class IngestionResult:
 def ingest_video(
     video_id: str,
     embeddings: Embeddings,
-    vector_db_path,
+    client: chromadb.ClientAPI,
     *,
     force: bool = False,
 ) -> IngestionResult:
@@ -31,14 +32,14 @@ def ingest_video(
     Skips ingestion if the collection already exists unless *force* is True.
     Raises TranscriptError on transcript fetch failures.
     """
-    if not force and collection_exists(video_id, vector_db_path):
+    if not force and collection_exists(video_id, client):
         logger.info("collection already exists, skipping", video_id=video_id)
         return IngestionResult(video_id=video_id, segments=0, chunks=0, already_existed=True)
 
     segments = fetch_transcript(video_id)
     docs = segments_to_documents(video_id, segments)
     chunks = chunk_documents(docs)
-    add_documents(video_id, chunks, embeddings, vector_db_path)
+    add_documents(video_id, chunks, embeddings, client)
 
     logger.info(
         "ingestion complete",

@@ -1,11 +1,12 @@
+import re
 from unittest.mock import MagicMock
 
+import chromadb
 import pytest
 from langchain_core.documents import Document
 
 from src.vector_store import (
     _collection_name,
-    _get_client,
     _sanitize_video_id,
     add_documents,
     collection_exists,
@@ -88,46 +89,25 @@ def test_sanitize_replaces_spaces():
 
 
 def test_collection_name_only_alphanumeric_and_underscore():
-    import re
-
     name = _collection_name("a.b-c/d e!f")
     # strip the known "video_" prefix then check the rest
     assert re.fullmatch(r"[a-zA-Z0-9_]+", name)
 
 
 # ---------------------------------------------------------------------------
-# _get_client
-# ---------------------------------------------------------------------------
-
-
-def test_get_client_creates_directory(tmp_path):
-    db_path = tmp_path / "nested" / "chroma"
-    assert not db_path.exists()
-    _get_client(db_path)
-    assert db_path.exists()
-
-
-def test_get_client_telemetry_disabled(tmp_path):
-    client = _get_client(tmp_path / "chroma")
-    assert client.get_settings().anonymized_telemetry is False
-
-
-def test_get_client_idempotent(tmp_path):
-    db_path = tmp_path / "chroma"
-    _get_client(db_path)
-    _get_client(db_path)  # must not raise on second call
-    assert db_path.exists()
-
-
-# ---------------------------------------------------------------------------
 # add_documents / query / collection_exists / delete_collection
-# Use a temporary directory for each test (no shared state).
+# Each test gets a fresh in-memory EphemeralClient — no shared state.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def tmp_db(tmp_path):
-    return tmp_path / "chroma"
+    from chromadb.config import Settings as ChromaSettings
+
+    return chromadb.PersistentClient(
+        path=str(tmp_path / "chroma"),
+        settings=ChromaSettings(anonymized_telemetry=False),
+    )
 
 
 def test_add_documents_does_not_raise(tmp_db):
@@ -146,9 +126,10 @@ def test_add_documents_with_precomputed_vectors_skips_embedding(tmp_db):
 def test_add_documents_precomputed_vectors_queryable(tmp_db):
     emb = _fake_embedding()
     docs = _docs(3)
-    vectors = [[0.0] * _DIM for _ in docs]
+    # Use distinct non-zero unit vectors so cosine similarity is well-defined.
+    vectors = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
     add_documents("vid1", docs, emb, tmp_db, precomputed_vectors=vectors)
-    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=3)
+    results = query("vid1", [1.0, 0.0, 0.0, 0.0], emb, tmp_db, k=3)
     assert {d.page_content for d in results} == {d.page_content for d in docs}
 
 
@@ -277,49 +258,6 @@ def test_delete_one_collection_does_not_affect_other(tmp_db):
     delete_collection("vid-a", tmp_db)
     # vid-b should still be queryable
     results = query("vid-b", [0.0] * _DIM, emb, tmp_db, k=2)
-    assert len(results) > 0
-
-
-# ---------------------------------------------------------------------------
-# Persistence: re-initialise client and verify data survives
-# ---------------------------------------------------------------------------
-
-
-def test_data_persists_across_client_reinit(tmp_db):
-    emb = _fake_embedding()
-    docs = _docs(3)
-    add_documents("vid1", docs, emb, tmp_db)
-
-    # Simulate a server restart: call query with a fresh client (same path)
-    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=3)
-    assert len(results) == 3
-    assert {d.page_content for d in results} == {d.page_content for d in docs}
-
-
-def test_collection_exists_survives_client_reinit(tmp_db):
-    emb = _fake_embedding()
-    add_documents("vid1", _docs(1), emb, tmp_db)
-    # collection_exists uses _get_client internally — always a fresh client
-    assert collection_exists("vid1", tmp_db) is True
-
-
-def test_deleted_collection_absent_after_reinit(tmp_db):
-    emb = _fake_embedding()
-    add_documents("vid1", _docs(2), emb, tmp_db)
-    delete_collection("vid1", tmp_db)
-    # Fresh client via collection_exists
-    assert collection_exists("vid1", tmp_db) is False
-
-
-def test_two_video_ids_persist_independently(tmp_db):
-    emb = _fake_embedding()
-    add_documents("persist-a", _docs(2), emb, tmp_db)
-    add_documents("persist-b", _docs(2), emb, tmp_db)
-
-    # Both collections survive re-reads
-    assert collection_exists("persist-a", tmp_db)
-    assert collection_exists("persist-b", tmp_db)
-    results = query("persist-a", [0.0] * _DIM, emb, tmp_db, k=2)
     assert len(results) > 0
 
 

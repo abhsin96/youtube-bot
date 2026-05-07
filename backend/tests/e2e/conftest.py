@@ -1,7 +1,7 @@
 """E2E test fixtures.
 
 Session-scoped mock OpenAI server (uvicorn in a background thread) +
-function-scoped fixtures that pre-populate a temporary Chroma DB with
+function-scoped fixtures that pre-populate an in-memory Chroma store with
 fixture documents embedded via the mock server.
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from pathlib import Path
 
+import chromadb
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
@@ -70,46 +70,46 @@ def _reset_mock_responses():
 
 
 # ---------------------------------------------------------------------------
-# Function-scoped: fresh temp Chroma DB + pre-populated fixture docs
+# Function-scoped: fresh in-memory Chroma store + pre-populated fixture docs
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
-def e2e_settings(mock_openai_url: str, tmp_path: Path) -> Settings:
-    """Settings that point to the mock OpenAI server and a temp Chroma dir."""
+def e2e_settings(mock_openai_url: str) -> Settings:
+    """Settings that point to the mock OpenAI server."""
     return Settings(
         openai_api_key="sk-e2e-mock",
         openai_api_base=mock_openai_url,
-        vector_db_path=tmp_path / "chroma",
         min_similarity_threshold=0.0,
         _env_file=None,
     )
 
 
 @pytest.fixture()
-def populated_db(e2e_settings: Settings) -> Path:
-    """Pre-populate a fresh Chroma DB with fixture docs; return its path."""
-    from src.vector_store import delete_collection
+def chroma_client() -> chromadb.ClientAPI:
+    """Fresh in-memory Chroma client, isolated per test."""
+    return chromadb.EphemeralClient()
 
+
+@pytest.fixture()
+def populated_db(e2e_settings: Settings, chroma_client: chromadb.ClientAPI) -> chromadb.ClientAPI:
+    """Pre-populate the in-memory Chroma store with fixture docs."""
     embeddings = OpenAIEmbeddings(
         model=e2e_settings.embed_model,
         openai_api_key=e2e_settings.openai_api_key,
         base_url=e2e_settings.openai_api_base,
     )
-    # Delete any existing collection to ensure fresh creation with cosine metric
-    delete_collection(FIXTURE_VIDEO_ID, e2e_settings.vector_db_path)
-
     add_documents(
         FIXTURE_VIDEO_ID,
         make_fixture_docs(),
         embeddings,
-        e2e_settings.vector_db_path,
+        chroma_client,
     )
-    return e2e_settings.vector_db_path
+    return chroma_client
 
 
 @pytest.fixture()
-def e2e_client(e2e_settings: Settings, populated_db: Path) -> TestClient:
+def e2e_client(e2e_settings: Settings, populated_db: chromadb.ClientAPI) -> TestClient:
     """TestClient wired to the mock OpenAI server and pre-populated Chroma."""
-    app = create_app(e2e_settings)
+    app = create_app(e2e_settings, chroma_client=populated_db)
     return TestClient(app, raise_server_exceptions=False)

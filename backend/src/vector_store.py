@@ -1,6 +1,5 @@
 import re
 import uuid
-from pathlib import Path
 
 import chromadb
 import structlog
@@ -25,53 +24,24 @@ def _collection_name(video_id: str) -> str:
     return f"video_{_sanitize_video_id(video_id)}"[:63]
 
 
-def _get_client(persist_directory: str | Path) -> chromadb.ClientAPI:
-    """Return a PersistentClient with telemetry disabled; create folder if absent."""
-    db_path = Path(persist_directory)
-    db_path.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(path=str(db_path), settings=_NO_TELEMETRY)
+def get_chroma_client(host: str, port: int) -> chromadb.ClientAPI:
+    """Return an HTTP client connected to the running Chroma server."""
+    return chromadb.HttpClient(host=host, port=port, settings=_NO_TELEMETRY)
 
 
 def _make_store(
     video_id: str,
     embedding: Embeddings,
-    persist_directory: str | Path,
+    client: chromadb.ClientAPI,
     *,
     create: bool = True,
 ) -> Chroma:
-    client = _get_client(persist_directory)
     collection_name = _collection_name(video_id)
-
-    # For existing collections, check and potentially recreate with correct metric
-    existing_collections = {c.name: c for c in client.list_collections()}
-
-    if collection_name in existing_collections:
-        existing_coll = existing_collections[collection_name]
-        # Check if it has the wrong distance metric
-        config = existing_coll.configuration
-        hnsw_space = config.get("hnsw", {}).get("space") if config else None
-
-        if hnsw_space and hnsw_space != "cosine":
-            # Delete and recreate with correct metric
-            logger.info(
-                "recreating collection with cosine metric",
-                video_id=video_id,
-                old_metric=hnsw_space,
-            )
-            client.delete_collection(collection_name)
-            # Now create new collection with cosine metric
-            if create:
-                client.create_collection(
-                    name=collection_name,
-                    metadata={"hnsw:space": "cosine"},
-                )
-    elif create:
-        # Collection doesn't exist, create it with cosine metric
-        client.create_collection(
+    if create:
+        client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-
     return Chroma(
         client=client,
         collection_name=collection_name,
@@ -83,18 +53,12 @@ def add_documents(
     video_id: str,
     docs: list[Document],
     embedding: Embeddings,
-    persist_directory: str | Path,
+    client: chromadb.ClientAPI,
     *,
     precomputed_vectors: list[list[float]] | None = None,
 ) -> None:
-    """Embed and persist *docs* into the collection for *video_id*.
-
-    Pass *precomputed_vectors* (parallel list of embedding vectors) to skip the
-    embedding API call.  When provided, vectors are inserted directly into the
-    Chroma collection, avoiding the double-embedding that would otherwise occur
-    when the caller has already run embed_chunks().
-    """
-    store = _make_store(video_id, embedding, persist_directory)
+    """Embed and persist *docs* into the collection for *video_id*."""
+    store = _make_store(video_id, embedding, client)
     if precomputed_vectors is not None:
         texts = [doc.page_content for doc in docs]
         metadatas = [doc.metadata for doc in docs]
@@ -114,26 +78,24 @@ def query(
     video_id: str,
     embedded_query: list[float],
     embedding: Embeddings,
-    persist_directory: str | Path,
+    client: chromadb.ClientAPI,
     k: int = 4,
 ) -> list[Document]:
     """Return up to *k* Documents nearest to *embedded_query*."""
-    store = _make_store(video_id, embedding, persist_directory)
+    store = _make_store(video_id, embedding, client)
     results = store.similarity_search_by_vector(embedded_query, k=k)
     logger.info("query executed", video_id=video_id, k=k, results=len(results))
     return results
 
 
-def collection_exists(video_id: str, persist_directory: str | Path) -> bool:
-    """Return True if a collection for *video_id* already exists on disk."""
-    client = _get_client(persist_directory)
+def collection_exists(video_id: str, client: chromadb.ClientAPI) -> bool:
+    """Return True if a collection for *video_id* already exists."""
     existing = {c.name for c in client.list_collections()}
     return _collection_name(video_id) in existing
 
 
-def delete_collection(video_id: str, persist_directory: str | Path) -> None:
+def delete_collection(video_id: str, client: chromadb.ClientAPI) -> None:
     """Delete the Chroma collection for *video_id* (no-op if absent)."""
-    client = _get_client(persist_directory)
     name = _collection_name(video_id)
     existing = {c.name for c in client.list_collections()}
     if name in existing:
@@ -143,20 +105,13 @@ def delete_collection(video_id: str, persist_directory: str | Path) -> None:
         logger.info("collection not found, skipping delete", video_id=video_id)
 
 
-def recreate_collection_with_correct_metric(video_id: str, persist_directory: str | Path) -> None:
-    """Delete and recreate collection to ensure correct distance metric."""
-    delete_collection(video_id, persist_directory)
-    logger.info("collection recreated with cosine metric", video_id=video_id)
-
-
 # ---------------------------------------------------------------------------
 # Channel metadata  (stored in Chroma collection metadata)
 # ---------------------------------------------------------------------------
 
 
-def save_channel_metadata(video_id: str, persist_directory: str | Path, metadata: dict) -> None:
+def save_channel_metadata(video_id: str, client: chromadb.ClientAPI, metadata: dict) -> None:
     """Persist channel metadata (title, channel_name, channel_url) in the Chroma collection."""
-    client = _get_client(persist_directory)
     name = _collection_name(video_id)
     collection = client.get_collection(name)
     existing = collection.metadata or {}
@@ -166,9 +121,8 @@ def save_channel_metadata(video_id: str, persist_directory: str | Path, metadata
     logger.info("channel_metadata_saved", video_id=video_id, channel=metadata.get("channel_name"))
 
 
-def get_channel_metadata(video_id: str, persist_directory: str | Path) -> dict:
+def get_channel_metadata(video_id: str, client: chromadb.ClientAPI) -> dict:
     """Return saved channel metadata, or an empty dict if not yet stored."""
-    client = _get_client(persist_directory)
     name = _collection_name(video_id)
     try:
         collection = client.get_collection(name)

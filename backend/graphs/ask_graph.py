@@ -14,13 +14,13 @@ into the running AskState by LangGraph.
 
 from __future__ import annotations
 
+import chromadb
 import structlog
 from langchain_core.documents import Document
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from langsmith.run_helpers import get_current_run_tree
 from typing_extensions import TypedDict
 
 from src.chain import _CHAT_PROMPT, _format_context, _load_system_prompt, _trim_to_budget
@@ -108,14 +108,19 @@ def make_initial_state(
 # ---------------------------------------------------------------------------
 
 
-def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
+def build_ask_graph(
+    settings,
+    embeddings,
+    *,
+    api_key: str | None = None,
+    chroma_client: chromadb.ClientAPI | None = None,
+):
     """
-    Compile the ask LangGraph, closing over *settings* and *embeddings*.
+    Compile the ask LangGraph, closing over *settings*, *embeddings*, and *chroma_client*.
 
     The LLM is bound with a web-search tool so it can autonomously look up
     creator/channel information when the transcript context is insufficient.
     """
-    vector_db_path = settings.vector_db_path
     chat_model_name = settings.chat_model
     openai_api_key = api_key or settings.openai_api_key
     context_budget_tokens = settings.context_budget_tokens
@@ -136,7 +141,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
     # ── Nodes ────────────────────────────────────────────────────────────────
 
     def validate_node(state: AskState) -> dict:
-        if not collection_exists(state["video_id"], vector_db_path):
+        if not collection_exists(state["video_id"], chroma_client):
             logger.info("collection not found", video_id=state["video_id"])
             return {"error": VIDEO_NOT_INGESTED}
         return {"error": None}
@@ -146,7 +151,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
             retriever = build_retriever(
                 state["video_id"],
                 embeddings,
-                vector_db_path,
+                chroma_client,
                 k=state.get("k", 5),
                 score_threshold=score_threshold,
             )
@@ -184,7 +189,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 
             # Prepend the channel name so the LLM can build a good search query
             # when it decides to call the web search tool.
-            channel_name = _resolve_channel_name(state["video_id"], vector_db_path)
+            channel_name = _resolve_channel_name(state["video_id"], chroma_client)
             if channel_name:
                 prefix = f"[Video Channel: {channel_name}]\n\n"
                 context = prefix + context if context else prefix.strip()
@@ -296,9 +301,9 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_channel_name(video_id: str, vector_db_path) -> str:
+def _resolve_channel_name(video_id: str, chroma_client) -> str:
     """Return channel name from stored metadata, falling back to oEmbed API."""
-    meta = get_channel_metadata(video_id, vector_db_path)
+    meta = get_channel_metadata(video_id, chroma_client)
     name = meta.get("channel_name", "")
     if not name:
         name = fetch_video_metadata(video_id).get("channel_name", "")

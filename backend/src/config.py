@@ -1,5 +1,4 @@
 import sys
-from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,8 +26,11 @@ class Settings(BaseSettings):
     embed_model: str = "text-embedding-3-small"
     chat_model: str = "gpt-4o-mini"
 
+    # --- Chroma server ---
+    chroma_host: str = "localhost"
+    chroma_port: int = 8001
+
     # --- retrieval ---
-    vector_db_path: Path = Path("chroma_db")
     min_similarity_threshold: float = 0.25
     max_history_turns: int = 10
     context_budget_tokens: int = 6000

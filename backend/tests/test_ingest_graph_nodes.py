@@ -44,7 +44,7 @@ def _state(**overrides) -> IngestState:
         "video_id": "vid1",
         "force": False,
         "embeddings": _fake_embeddings(),
-        "vector_db_path": "/tmp/db",
+        "chroma_client": MagicMock(),
         "segments": [],
         "chunks": [],
         "embedded_chunks": [],
@@ -179,19 +179,21 @@ def test_store_node_uses_precomputed_vectors():
     pairs = [(_CHUNKS[0], [0.1, 0.2, 0.3, 0.4])]
     with patch("graphs.ingest_graph.add_documents") as mock_add:
         emb = _fake_embeddings()
+        client = MagicMock()
         store_node(
-            _state(chunks=_CHUNKS, embedded_chunks=pairs, embeddings=emb, vector_db_path="/db")
+            _state(chunks=_CHUNKS, embedded_chunks=pairs, embeddings=emb, chroma_client=client)
         )
     mock_add.assert_called_once_with(
-        "vid1", [_CHUNKS[0]], emb, "/db", precomputed_vectors=[[0.1, 0.2, 0.3, 0.4]]
+        "vid1", [_CHUNKS[0]], emb, client, precomputed_vectors=[[0.1, 0.2, 0.3, 0.4]]
     )
 
 
 def test_store_node_falls_back_when_no_embedded_chunks():
     with patch("graphs.ingest_graph.add_documents") as mock_add:
         emb = _fake_embeddings()
-        store_node(_state(chunks=_CHUNKS, embedded_chunks=[], embeddings=emb, vector_db_path="/db"))
-    mock_add.assert_called_once_with("vid1", _CHUNKS, emb, "/db")
+        client = MagicMock()
+        store_node(_state(chunks=_CHUNKS, embedded_chunks=[], embeddings=emb, chroma_client=client))
+    mock_add.assert_called_once_with("vid1", _CHUNKS, emb, client)
 
 
 def test_store_node_error_on_failure():
@@ -242,8 +244,7 @@ def test_route_on_error_returns_ok_on_pending():
 # ---------------------------------------------------------------------------
 
 
-def test_graph_happy_path(tmp_path):
-    db = tmp_path / "chroma"
+def test_graph_happy_path():
     with (
         patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
@@ -252,7 +253,7 @@ def test_graph_happy_path(tmp_path):
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
         patch("graphs.ingest_graph.add_documents"),
     ):
-        result = build_graph().invoke(_state(vector_db_path=str(db)))
+        result = build_graph().invoke(_state())
 
     assert result["status"] == "done"
     assert result["error"] is None
@@ -268,8 +269,7 @@ def test_graph_skips_when_collection_exists():
     assert result["segments"] == []  # never populated
 
 
-def test_graph_force_bypasses_idempotency(tmp_path):
-    db = tmp_path / "chroma"
+def test_graph_force_bypasses_idempotency():
     with (
         patch("graphs.ingest_graph.collection_exists", return_value=True),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
@@ -278,7 +278,7 @@ def test_graph_force_bypasses_idempotency(tmp_path):
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
         patch("graphs.ingest_graph.add_documents"),
     ):
-        result = build_graph().invoke(_state(force=True, vector_db_path=str(db)))
+        result = build_graph().invoke(_state(force=True))
 
     assert result["status"] == "done"
 
@@ -316,9 +316,10 @@ def test_graph_stops_at_embed_error():
 
 
 def test_rollback_calls_delete_collection():
+    client = MagicMock()
     with patch("graphs.ingest_graph.delete_collection") as mock_del:
-        rollback_node(_state(video_id="vid1", vector_db_path="/db", status="error"))
-    mock_del.assert_called_once_with("vid1", "/db")
+        rollback_node(_state(video_id="vid1", chroma_client=client, status="error"))
+    mock_del.assert_called_once_with("vid1", client)
 
 
 def test_rollback_returns_empty_dict():
@@ -347,8 +348,8 @@ def test_rollback_tolerates_delete_failure():
 # ---------------------------------------------------------------------------
 
 
-def test_rollback_called_on_embed_failure(tmp_path):
-    db = tmp_path / "chroma"
+def test_rollback_called_on_embed_failure():
+    client = MagicMock()
     with (
         patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
@@ -357,14 +358,14 @@ def test_rollback_called_on_embed_failure(tmp_path):
         patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("rate limit")),
         patch("graphs.ingest_graph.delete_collection") as mock_del,
     ):
-        result = build_graph().invoke(_state(vector_db_path=str(db)))
+        result = build_graph().invoke(_state(chroma_client=client))
 
     assert result["status"] == "error"
-    mock_del.assert_called_once_with("vid1", str(db))
+    mock_del.assert_called_once_with("vid1", client)
 
 
-def test_rollback_called_on_store_failure(tmp_path):
-    db = tmp_path / "chroma"
+def test_rollback_called_on_store_failure():
+    client = MagicMock()
     with (
         patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
@@ -374,14 +375,13 @@ def test_rollback_called_on_store_failure(tmp_path):
         patch("graphs.ingest_graph.add_documents", side_effect=RuntimeError("chroma down")),
         patch("graphs.ingest_graph.delete_collection") as mock_del,
     ):
-        result = build_graph().invoke(_state(vector_db_path=str(db)))
+        result = build_graph().invoke(_state(chroma_client=client))
 
     assert result["status"] == "error"
-    mock_del.assert_called_once_with("vid1", str(db))
+    mock_del.assert_called_once_with("vid1", client)
 
 
-def test_rollback_not_called_on_success(tmp_path):
-    db = tmp_path / "chroma"
+def test_rollback_not_called_on_success():
     with (
         patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
@@ -391,16 +391,16 @@ def test_rollback_not_called_on_success(tmp_path):
         patch("graphs.ingest_graph.add_documents"),
         patch("graphs.ingest_graph.delete_collection") as mock_del,
     ):
-        result = build_graph().invoke(_state(vector_db_path=str(db)))
+        result = build_graph().invoke(_state())
 
     assert result["status"] == "done"
     mock_del.assert_not_called()
 
 
-def test_retry_succeeds_after_rollback(tmp_path):
+def test_retry_succeeds_after_rollback():
     """After a failed run (collection deleted), a second run completes."""
-    db = tmp_path / "chroma"
-    base = _state(vector_db_path=str(db))
+    client = MagicMock()
+    base = _state(chroma_client=client)
 
     # First run: embed fails → rollback deletes collection
     with (

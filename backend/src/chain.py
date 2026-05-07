@@ -2,6 +2,7 @@ import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import chromadb
 import structlog
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -142,7 +143,7 @@ def answer_question(
     video_id: str,
     question: str,
     embeddings: Embeddings,
-    vector_db_path,
+    chroma_client: chromadb.ClientAPI,
     chat_model: str,
     openai_api_key: str,
     k: int = 5,
@@ -153,7 +154,7 @@ def answer_question(
 ) -> RAGResult:
     """Retrieve relevant chunks then call the LLM; return answer + sources."""
     retriever = build_retriever(
-        video_id, embeddings, vector_db_path, k=k, score_threshold=score_threshold
+        video_id, embeddings, chroma_client, k=k, score_threshold=score_threshold
     )
     sources = retriever.invoke(question)
 

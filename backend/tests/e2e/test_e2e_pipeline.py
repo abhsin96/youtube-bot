@@ -177,17 +177,13 @@ class TestQueryStreamE2E:
 
 
 class TestIngestE2E:
-    def test_ingest_full_pipeline_returns_done(self, e2e_settings, mock_openai_url):
+    def test_ingest_full_pipeline_returns_done(self, e2e_settings, chroma_client, mock_openai_url):
         from src.main import create_app
 
-        settings = e2e_settings.__class__(
-            openai_api_key=e2e_settings.openai_api_key,
-            openai_api_base=e2e_settings.openai_api_base,
-            vector_db_path=e2e_settings.vector_db_path,
-            min_similarity_threshold=0.0,
-            _env_file=None,
+        client = TestClient(
+            create_app(e2e_settings, chroma_client=chroma_client),
+            raise_server_exceptions=False,
         )
-        client = TestClient(create_app(settings), raise_server_exceptions=False)
 
         with patch("graphs.ingest_graph.fetch_transcript", return_value=FIXTURE_SEGMENTS):
             resp = client.post("/ingest", json={"video_id": "ingest_e2e_test_01"})
@@ -205,18 +201,14 @@ class TestIngestE2E:
         assert body["status"] == "skipped"
         assert body["cached"] is True
 
-    def test_ingest_force_reruns_pipeline(self, e2e_settings, mock_openai_url):
+    def test_ingest_force_reruns_pipeline(self, e2e_settings, chroma_client, mock_openai_url):
         from src.main import create_app
 
-        settings = e2e_settings.__class__(
-            openai_api_key=e2e_settings.openai_api_key,
-            openai_api_base=e2e_settings.openai_api_base,
-            vector_db_path=e2e_settings.vector_db_path,
-            min_similarity_threshold=0.0,
-            _env_file=None,
-        )
         # First ingest
-        client = TestClient(create_app(settings), raise_server_exceptions=False)
+        client = TestClient(
+            create_app(e2e_settings, chroma_client=chroma_client),
+            raise_server_exceptions=False,
+        )
         with patch("graphs.ingest_graph.fetch_transcript", return_value=FIXTURE_SEGMENTS):
             client.post("/ingest", json={"video_id": "force_rerun_test_01"})
             # Force re-ingest

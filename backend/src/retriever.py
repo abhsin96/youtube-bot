@@ -6,12 +6,11 @@ which normalises raw distances to a [0, 1] relevance score) and filters results 
 a configurable threshold.  Because it subclasses BaseRetriever it is a full Runnable
 and composes with any LCEL chain via the | operator.
 
-    retriever = build_retriever(video_id, embeddings, vector_db_path, k=5, score_threshold=0.25)
+    retriever = build_retriever(video_id, embeddings, chroma_client, k=5, score_threshold=0.25)
     chain = retriever | format_docs | prompt | llm | StrOutputParser()
 """
 
-from pathlib import Path
-
+import chromadb
 import structlog
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
@@ -38,7 +37,7 @@ class VideoRetriever(BaseRetriever):
 
     video_id: str
     embeddings: Embeddings
-    vector_db_path: str | Path
+    chroma_client: chromadb.ClientAPI
     k: int = Field(default=4, ge=1)
     score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
 
@@ -48,7 +47,7 @@ class VideoRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
-        store = _make_store(self.video_id, self.embeddings, self.vector_db_path, create=False)
+        store = _make_store(self.video_id, self.embeddings, self.chroma_client, create=False)
 
         # similarity_search_with_relevance_scores wraps similarity_search_with_score
         # and normalises raw Chroma distances to a [0, 1] relevance score.
@@ -81,7 +80,7 @@ class VideoRetriever(BaseRetriever):
 def build_retriever(
     video_id: str,
     embeddings: Embeddings,
-    vector_db_path: str | Path,
+    chroma_client: chromadb.ClientAPI,
     *,
     k: int = 4,
     score_threshold: float = 0.0,
@@ -90,7 +89,7 @@ def build_retriever(
     return VideoRetriever(
         video_id=video_id,
         embeddings=embeddings,
-        vector_db_path=vector_db_path,
+        chroma_client=chroma_client,
         k=k,
         score_threshold=score_threshold,
     )

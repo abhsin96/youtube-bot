@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
+import chromadb
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
@@ -39,7 +40,7 @@ from src.error_envelope import (
 )
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
-from src.vector_store import collection_exists
+from src.vector_store import collection_exists, get_chroma_client
 
 logger = structlog.get_logger(__name__)
 
@@ -135,7 +136,9 @@ def _get_or_rebuild_ask_graph(app: FastAPI, settings: Settings, key: str, emb):
             "building ask graph",
             reason="api_key_changed" if cache["key_hash"] else "first_build",
         )
-        cache["graph"] = build_ask_graph(settings, emb, api_key=key)
+        cache["graph"] = build_ask_graph(
+            settings, emb, api_key=key, chroma_client=app.state.chroma_client
+        )
         cache["key_hash"] = key_hash
     return cache["graph"]
 
@@ -143,6 +146,8 @@ def _get_or_rebuild_ask_graph(app: FastAPI, settings: Settings, key: str, emb):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
+    if app.state.chroma_client is None:
+        app.state.chroma_client = get_chroma_client(settings.chroma_host, settings.chroma_port)
     logger.info("server starting", project=settings.langsmith_project)
     yield
     logger.info("server stopped")
@@ -244,7 +249,11 @@ def _resolve_key(settings: Settings) -> str:
 # --- app factory ---
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    chroma_client: chromadb.ClientAPI | None = None,
+) -> FastAPI:
     if settings is None:
         settings = load_settings()
 
@@ -254,6 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="youtube-extention", lifespan=lifespan)
     app.state.settings = settings
+    app.state.chroma_client = chroma_client  # None means lazy-init in lifespan
     app.state.ask_graph_cache = {"key_hash": None, "graph": None}
     app.state.limiter = limiter
 
@@ -328,7 +338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "video_id": body.video_id,
             "force": body.force,
             "embeddings": embeddings,
-            "vector_db_path": s.vector_db_path,
+            "chroma_client": app.state.chroma_client,
             "segments": [],
             "chunks": [],
             "embedded_chunks": [],
@@ -403,7 +413,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 video_id=body.video_id,
                 question=body.question,
                 embeddings=emb,
-                vector_db_path=s.vector_db_path,
+                chroma_client=app.state.chroma_client,
                 chat_model=s.chat_model,
                 openai_api_key=key,
                 k=body.k,
@@ -464,7 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str
     ) -> StreamingResponse:
         """Streaming Q&A via the ask graph with Server-Sent Events."""
-        if not collection_exists(body.video_id, s.vector_db_path):
+        if not collection_exists(body.video_id, app.state.chroma_client):
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
         graph = _get_or_rebuild_ask_graph(app, s, key, emb)

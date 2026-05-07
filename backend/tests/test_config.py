@@ -1,4 +1,3 @@
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +17,8 @@ def test_defaults():
     s = make()
     assert s.embed_model == "text-embedding-3-small"
     assert s.chat_model == "gpt-4o-mini"
-    assert s.vector_db_path == Path("chroma_db")
+    assert s.chroma_host == "localhost"
+    assert s.chroma_port == 8001
     assert s.min_similarity_threshold == 0.25
     assert s.max_history_turns == 10
     assert s.langsmith_project == "youtube-extention"
@@ -55,9 +55,10 @@ def test_custom_retrieval_params():
     assert s.max_history_turns == 5
 
 
-def test_vector_db_path_as_string():
-    s = make(vector_db_path="/tmp/mydb")
-    assert s.vector_db_path == Path("/tmp/mydb")
+def test_custom_chroma_host_and_port():
+    s = make(chroma_host="chroma-server", chroma_port=9000)
+    assert s.chroma_host == "chroma-server"
+    assert s.chroma_port == 9000
 
 
 # --- validators ---

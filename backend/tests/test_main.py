@@ -9,8 +9,10 @@ from src.main import create_app
 
 @pytest.fixture()
 def client():
+    import chromadb
+
     settings = Settings(openai_api_key="sk-test", _env_file=None)
-    app = create_app(settings)
+    app = create_app(settings, chroma_client=chromadb.EphemeralClient())
     return TestClient(app)
 
 
@@ -87,16 +89,24 @@ def test_health_langsmith_enabled_false(client):
 
 
 def test_health_langsmith_enabled_true():
+    import chromadb
+
     settings = Settings(openai_api_key="sk-test", langsmith_tracing="true", _env_file=None)
-    c = TestClient(create_app(settings))
+    c = TestClient(create_app(settings, chroma_client=chromadb.EphemeralClient()))
     body = c.get("/health").json()
     assert body["langsmith_enabled"] is True
 
 
 def test_health_has_api_key_false():
-    # Bypass the validator by patching; just verify the field is present and boolean
+    import chromadb
+
     body = (
-        TestClient(create_app(Settings(openai_api_key="sk-test", _env_file=None)))
+        TestClient(
+            create_app(
+                Settings(openai_api_key="sk-test", _env_file=None),
+                chroma_client=chromadb.EphemeralClient(),
+            )
+        )
         .get("/health")
         .json()
     )
@@ -114,7 +124,7 @@ _GRAPH_DONE = {
     "embedded_chunks": [],
     "force": False,
     "embeddings": None,
-    "vector_db_path": "chroma_db",
+    "chroma_client": None,
 }
 
 _GRAPH_SKIPPED = {**_GRAPH_DONE, "status": "skipped", "chunks": []}
@@ -242,8 +252,10 @@ def test_ingest_route_passes_video_id_kwarg(client):
 
 
 def test_ingest_rate_limit_returns_429_after_10_requests():
+    import chromadb
+
     settings = Settings(openai_api_key="sk-test", _env_file=None)
-    c = TestClient(create_app(settings))
+    c = TestClient(create_app(settings, chroma_client=chromadb.EphemeralClient()))
     with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE):
         for _ in range(10):
             resp = c.post("/ingest", json={"video_id": "vid1"})
@@ -255,8 +267,10 @@ def test_ingest_rate_limit_returns_429_after_10_requests():
 
 
 def test_config_api_key_rate_limit_returns_429_after_5_requests():
+    import chromadb
+
     settings = Settings(openai_api_key="sk-test", _env_file=None)
-    c = TestClient(create_app(settings))
+    c = TestClient(create_app(settings, chroma_client=chromadb.EphemeralClient()))
     with patch("src.main.set_api_key"):
         for _ in range(5):
             resp = c.post("/config/api-key", json={"api_key": "sk-test"})
