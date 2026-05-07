@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -83,6 +84,84 @@ def _run_ask_graph(graph, state: AskState, *, video_id: str, thread_id: str | No
 def _run_answer_question(*args, **kwargs):
     """Bridge for running answer_question in a threadpool with tracing."""
     return answer_question(*args, **kwargs)
+
+
+async def _stream_answer(
+    video_id: str,
+    question: str,
+    history: list,
+    k: int,
+    s: Settings,
+    key: str,
+    emb,
+    thread_id: str,
+    endpoint: str,
+) -> AsyncIterator[str]:
+    """Shared SSE token-stream generator for /ask/stream and /query?stream=true.
+
+    Callers must validate that the collection exists and raise HTTP errors
+    *before* iterating this generator — any error raised here arrives after
+    the 200 OK header has already been flushed, so it becomes an SSE error
+    frame rather than an HTTP error response.
+    """
+    retriever = build_retriever(
+        video_id,
+        emb,
+        s.vector_db_path,
+        k=k,
+        score_threshold=s.min_similarity_threshold,
+    )
+    chunks = retriever.invoke(question)
+
+    system = _load_system_prompt()
+    trimmed = (
+        _trim_to_budget(chunks, system, history, question, s.chat_model, s.context_budget_tokens)
+        if chunks
+        else []
+    )
+
+    citations = [
+        {
+            "chunk_id": doc.metadata.get("chunk_id"),
+            "start_ts": doc.metadata.get("start_ts"),
+            "end_ts": doc.metadata.get("end_ts"),
+            "text": doc.page_content,
+        }
+        for doc in trimmed
+    ]
+
+    try:
+        if not trimmed:
+            refusal = "I'm sorry, that information isn't available in the video transcript."
+            yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True, 'thread_id': thread_id})}\n\n"
+            return
+
+        stream_kwargs: dict = {
+            "model": s.chat_model,
+            "openai_api_key": key,
+            "temperature": 0.2,
+            "streaming": True,
+        }
+        if s.openai_api_base:
+            stream_kwargs["base_url"] = s.openai_api_base
+        streaming_llm = ChatOpenAI(**stream_kwargs)
+        chain = build_chat_prompt() | streaming_llm | StrOutputParser()
+        full_answer = ""
+        async for token in chain.astream(
+            {
+                "context": _format_context(trimmed),
+                "question": question,
+                "history": history,
+            }
+        ):
+            full_answer += token
+            yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+
+        refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
+        yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused, 'thread_id': thread_id})}\n\n"
+    except Exception:
+        logger.exception("stream_error", video_id=video_id, endpoint=endpoint)
+        yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
 
 
 def _get_or_rebuild_ask_graph(app: FastAPI, settings: Settings, key: str, emb):
@@ -400,82 +479,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         key = _resolve_key(s)
         emb = get_embeddings(s, api_key=key)
 
-        # Generate or use provided thread_id for conversation tracking
         thread_id = body.thread_id or str(uuid7())
         logger.info("ask_stream_started", video_id=body.video_id, thread_id=thread_id)
 
-        # Validate + retrieve before opening the SSE channel so we can raise
-        # HTTP errors instead of embedding them mid-stream.
         if not collection_exists(body.video_id, s.vector_db_path):
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
-        retriever = build_retriever(
-            body.video_id,
-            emb,
-            s.vector_db_path,
-            k=body.k,
-            score_threshold=s.min_similarity_threshold,
+        return StreamingResponse(
+            _stream_answer(
+                video_id=body.video_id,
+                question=body.question,
+                history=_to_langchain_history(body.conversation_history, s.max_history_turns),
+                k=body.k,
+                s=s,
+                key=key,
+                emb=emb,
+                thread_id=thread_id,
+                endpoint="/ask/stream",
+            ),
+            media_type="text/event-stream",
         )
-        chunks = retriever.invoke(body.question)
-
-        history = _to_langchain_history(body.conversation_history, s.max_history_turns)
-        system = _load_system_prompt()
-        trimmed = (
-            _trim_to_budget(
-                chunks, system, history, body.question, s.chat_model, s.context_budget_tokens
-            )
-            if chunks
-            else []
-        )
-
-        citations = [
-            {
-                "chunk_id": doc.metadata.get("chunk_id"),
-                "start_ts": doc.metadata.get("start_ts"),
-                "end_ts": doc.metadata.get("end_ts"),
-                "text": doc.page_content,
-            }
-            for doc in trimmed
-        ]
-
-        @traceable(
-            name="Chat Bot Stream", metadata={"thread_id": thread_id, "endpoint": "/ask/stream"}
-        )
-        async def event_stream():
-            try:
-                if not trimmed:
-                    refusal = "I'm sorry, that information isn't available in the video transcript."
-                    yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True, 'thread_id': thread_id})}\n\n"
-                    return
-
-                stream_kwargs: dict = {
-                    "model": s.chat_model,
-                    "openai_api_key": key,
-                    "temperature": 0.2,
-                    "streaming": True,
-                }
-                if s.openai_api_base:
-                    stream_kwargs["base_url"] = s.openai_api_base
-                streaming_llm = ChatOpenAI(**stream_kwargs)
-                chain = build_chat_prompt() | streaming_llm | StrOutputParser()
-                full_answer = ""
-                async for token in chain.astream(
-                    {
-                        "context": _format_context(trimmed),
-                        "question": body.question,
-                        "history": history,
-                    }
-                ):
-                    full_answer += token
-                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-
-                refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
-                yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused, 'thread_id': thread_id})}\n\n"
-            except Exception:
-                logger.exception("stream_error", video_id=body.video_id)
-                yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # --- Unified /query endpoint ---
 
@@ -587,75 +610,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str
     ) -> StreamingResponse:
         """Streaming Q&A with Server-Sent Events."""
-        # Validate + retrieve before opening the SSE channel
         if not collection_exists(body.video_id, s.vector_db_path):
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
-        retriever = build_retriever(
-            body.video_id,
-            emb,
-            s.vector_db_path,
-            k=body.k,
-            score_threshold=s.min_similarity_threshold,
+        return StreamingResponse(
+            _stream_answer(
+                video_id=body.video_id,
+                question=body.question,
+                history=_to_langchain_history(body.conversation_history, s.max_history_turns),
+                k=body.k,
+                s=s,
+                key=key,
+                emb=emb,
+                thread_id=thread_id,
+                endpoint="/query",
+            ),
+            media_type="text/event-stream",
         )
-        chunks = retriever.invoke(body.question)
-
-        history = _to_langchain_history(body.conversation_history, s.max_history_turns)
-        system = _load_system_prompt()
-        trimmed = (
-            _trim_to_budget(
-                chunks, system, history, body.question, s.chat_model, s.context_budget_tokens
-            )
-            if chunks
-            else []
-        )
-
-        citations = [
-            {
-                "chunk_id": doc.metadata.get("chunk_id"),
-                "start_ts": doc.metadata.get("start_ts"),
-                "end_ts": doc.metadata.get("end_ts"),
-                "text": doc.page_content,
-            }
-            for doc in trimmed
-        ]
-
-        @traceable(name="Chat Bot Stream", metadata={"thread_id": thread_id, "endpoint": "/query"})
-        async def event_stream():
-            try:
-                if not trimmed:
-                    refusal = "I'm sorry, that information isn't available in the video transcript."
-                    yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True, 'thread_id': thread_id})}\n\n"
-                    return
-
-                stream_kwargs: dict = {
-                    "model": s.chat_model,
-                    "openai_api_key": key,
-                    "temperature": 0.2,
-                    "streaming": True,
-                }
-                if s.openai_api_base:
-                    stream_kwargs["base_url"] = s.openai_api_base
-                streaming_llm = ChatOpenAI(**stream_kwargs)
-                chain = build_chat_prompt() | streaming_llm | StrOutputParser()
-                full_answer = ""
-                async for token in chain.astream(
-                    {
-                        "context": _format_context(trimmed),
-                        "question": body.question,
-                        "history": history,
-                    }
-                ):
-                    full_answer += token
-                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-
-                refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
-                yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused, 'thread_id': thread_id})}\n\n"
-            except Exception:
-                logger.exception("stream_error", video_id=body.video_id)
-                yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return app
 
