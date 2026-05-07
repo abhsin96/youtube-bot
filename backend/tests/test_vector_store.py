@@ -132,6 +132,24 @@ def test_add_documents_does_not_raise(tmp_db):
     add_documents("vid1", _docs(), _fake_embedding(), tmp_db)
 
 
+def test_add_documents_with_precomputed_vectors_skips_embedding(tmp_db):
+    emb = _fake_embedding()
+    docs = _docs(3)
+    vectors = [[float(i)] * _DIM for i in range(len(docs))]
+    add_documents("vid1", docs, emb, tmp_db, precomputed_vectors=vectors)
+    emb.embed_documents.assert_not_called()
+    assert collection_exists("vid1", tmp_db)
+
+
+def test_add_documents_precomputed_vectors_queryable(tmp_db):
+    emb = _fake_embedding()
+    docs = _docs(3)
+    vectors = [[0.0] * _DIM for _ in docs]
+    add_documents("vid1", docs, emb, tmp_db, precomputed_vectors=vectors)
+    results = query("vid1", [0.0] * _DIM, emb, tmp_db, k=3)
+    assert {d.page_content for d in results} == {d.page_content for d in docs}
+
+
 def test_collection_exists_false_before_add(tmp_db):
     assert collection_exists("new-vid", tmp_db) is False
 

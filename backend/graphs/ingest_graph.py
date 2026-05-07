@@ -218,22 +218,34 @@ def embed_node(state: IngestState) -> dict:
 
 
 def store_node(state: IngestState) -> dict:
-    """Persist chunks into the vector store.
+    """Persist chunks into the vector store using pre-computed embeddings.
 
-    Uses the plain chunk list (not embedded_chunks) because add_documents
-    re-embeds internally via the Chroma integration — the embedded_chunks
-    field is available for downstream consumers (e.g. returning vectors to
-    the caller) but Chroma manages its own index.
+    Reads the (Document, vector) pairs produced by embed_node so that
+    Chroma never re-embeds the same text.  Falls back to letting Chroma
+    embed when embedded_chunks is unexpectedly empty (defensive only —
+    this branch should not be reached in normal pipeline flow).
 
     Owns: status (→ "done")
     """
     try:
-        add_documents(
-            state["video_id"],
-            state["chunks"],
-            state["embeddings"],
-            state["vector_db_path"],
-        )
+        embedded = state.get("embedded_chunks") or []
+        if embedded:
+            docs_list = [doc for doc, _ in embedded]
+            vectors = [vec for _, vec in embedded]
+            add_documents(
+                state["video_id"],
+                docs_list,
+                state["embeddings"],
+                state["vector_db_path"],
+                precomputed_vectors=vectors,
+            )
+        else:
+            add_documents(
+                state["video_id"],
+                state["chunks"],
+                state["embeddings"],
+                state["vector_db_path"],
+            )
     except Exception as exc:
         logger.error("store failed", video_id=state["video_id"], error=str(exc))
         return _error(str(exc))

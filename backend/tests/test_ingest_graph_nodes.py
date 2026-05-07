@@ -175,10 +175,22 @@ def test_store_node_sets_status_done():
     assert result["error"] is None
 
 
-def test_store_node_calls_add_documents():
+def test_store_node_uses_precomputed_vectors():
+    pairs = [(_CHUNKS[0], [0.1, 0.2, 0.3, 0.4])]
     with patch("graphs.ingest_graph.add_documents") as mock_add:
         emb = _fake_embeddings()
-        store_node(_state(chunks=_CHUNKS, embeddings=emb, vector_db_path="/db"))
+        store_node(
+            _state(chunks=_CHUNKS, embedded_chunks=pairs, embeddings=emb, vector_db_path="/db")
+        )
+    mock_add.assert_called_once_with(
+        "vid1", [_CHUNKS[0]], emb, "/db", precomputed_vectors=[[0.1, 0.2, 0.3, 0.4]]
+    )
+
+
+def test_store_node_falls_back_when_no_embedded_chunks():
+    with patch("graphs.ingest_graph.add_documents") as mock_add:
+        emb = _fake_embeddings()
+        store_node(_state(chunks=_CHUNKS, embedded_chunks=[], embeddings=emb, vector_db_path="/db"))
     mock_add.assert_called_once_with("vid1", _CHUNKS, emb, "/db")
 
 

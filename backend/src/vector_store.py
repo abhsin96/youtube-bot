@@ -1,5 +1,6 @@
 import json
 import re
+import uuid
 from pathlib import Path
 
 import chromadb
@@ -84,10 +85,29 @@ def add_documents(
     docs: list[Document],
     embedding: Embeddings,
     persist_directory: str | Path,
+    *,
+    precomputed_vectors: list[list[float]] | None = None,
 ) -> None:
-    """Embed and persist *docs* into the collection for *video_id*."""
+    """Embed and persist *docs* into the collection for *video_id*.
+
+    Pass *precomputed_vectors* (parallel list of embedding vectors) to skip the
+    embedding API call.  When provided, vectors are inserted directly into the
+    Chroma collection, avoiding the double-embedding that would otherwise occur
+    when the caller has already run embed_chunks().
+    """
     store = _make_store(video_id, embedding, persist_directory)
-    store.add_documents(docs)
+    if precomputed_vectors is not None:
+        texts = [doc.page_content for doc in docs]
+        metadatas = [doc.metadata for doc in docs]
+        ids = [str(uuid.uuid4()) for _ in docs]
+        store._collection.add(
+            ids=ids,
+            embeddings=precomputed_vectors,
+            documents=texts,
+            metadatas=metadatas,
+        )
+    else:
+        store.add_documents(docs)
     logger.info("documents added", video_id=video_id, count=len(docs))
 
 
