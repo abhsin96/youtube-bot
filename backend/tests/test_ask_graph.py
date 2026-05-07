@@ -129,6 +129,19 @@ class TestRetrieveNode:
 
     @patch("graphs.ask_graph.collection_exists", return_value=True)
     @patch("graphs.ask_graph.build_retriever")
+    def test_passes_score_threshold_from_settings(self, mock_br, _mock_ce, settings, embeddings):
+        mock_retriever = MagicMock()
+        mock_retriever.invoke.return_value = []
+        mock_br.return_value = mock_retriever
+        settings.min_similarity_threshold = 0.7
+
+        graph = build_ask_graph(settings, embeddings)
+        graph.invoke(make_initial_state("vid1", "q?"))
+
+        assert mock_br.call_args.kwargs["score_threshold"] == 0.7
+
+    @patch("graphs.ask_graph.collection_exists", return_value=True)
+    @patch("graphs.ask_graph.build_retriever")
     def test_retrieved_chunks_stored_in_state(self, mock_br, _mock_ce, settings, embeddings):
         doc = _doc()
         mock_retriever = MagicMock()

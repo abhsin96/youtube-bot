@@ -120,6 +120,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
     openai_api_key = api_key or settings.openai_api_key
     context_budget_tokens = settings.context_budget_tokens
     openai_api_base: str = getattr(settings, "openai_api_base", "")
+    score_threshold: float = settings.min_similarity_threshold
 
     llm_kwargs: dict = {
         "model": chat_model_name,
@@ -147,7 +148,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
                 embeddings,
                 vector_db_path,
                 k=state.get("k", 5),
-                score_threshold=0.0,
+                score_threshold=score_threshold,
             )
             chunks = retriever.invoke(state["question"])
             max_score: float | None = (
