@@ -23,7 +23,7 @@ from langgraph.graph import END, StateGraph
 from langsmith.run_helpers import get_current_run_tree
 from typing_extensions import TypedDict
 
-from src.chain import _format_context, _load_system_prompt, _trim_to_budget, build_chat_prompt
+from src.chain import _CHAT_PROMPT, _format_context, _load_system_prompt, _trim_to_budget
 from src.metadata_service import fetch_video_metadata
 from src.retriever import build_retriever
 from src.vector_store import collection_exists, get_channel_metadata
@@ -132,8 +132,6 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
 
     llm = ChatOpenAI(**llm_kwargs)
     llm_with_tools = llm.bind_tools([search_web_for_creator])
-    prompt_template = build_chat_prompt()
-
     # ── Nodes ────────────────────────────────────────────────────────────────
 
     def validate_node(state: AskState) -> dict:
@@ -198,7 +196,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
                     "answer": "I'm sorry, that information isn't available in the video transcript.",
                 }
 
-            prompt_value = prompt_template.invoke(
+            prompt_value = _CHAT_PROMPT.invoke(
                 {"context": context, "question": state["question"], "history": history}
             )
             messages = prompt_value.to_messages()

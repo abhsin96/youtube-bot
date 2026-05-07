@@ -1,3 +1,4 @@
+import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,7 @@ Relevant transcript excerpts:
 Question: {question}"""
 
 
+@functools.lru_cache(maxsize=1)
 def _load_system_prompt() -> str:
     return (_PROMPTS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
 
@@ -119,6 +121,9 @@ def build_chat_prompt() -> ChatPromptTemplate:
     )
 
 
+_CHAT_PROMPT = build_chat_prompt()
+
+
 def build_rag_chain(chat_model: str, openai_api_key: str, openai_api_base: str = ""):
     """Return an LCEL chain: {context, question, history} → answer str."""
     kwargs: dict = {
@@ -130,7 +135,7 @@ def build_rag_chain(chat_model: str, openai_api_key: str, openai_api_base: str =
     if openai_api_base:
         kwargs["base_url"] = openai_api_base
     llm = ChatOpenAI(**kwargs)
-    return build_chat_prompt() | llm | StrOutputParser()
+    return _CHAT_PROMPT | llm | StrOutputParser()
 
 
 def answer_question(
