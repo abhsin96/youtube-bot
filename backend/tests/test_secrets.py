@@ -20,14 +20,14 @@ import pytest
 import structlog.testing
 from fastapi.testclient import TestClient
 
-from src.config import Settings
-from src.main import create_app
-from src.secrets import (
+from src.api_secrets import (
     clear_api_key,
     get_api_key,
     get_openai_key,
     set_api_key,
 )
+from src.config import Settings
+from src.main import create_app
 
 # ---------------------------------------------------------------------------
 # In-memory keyring backend

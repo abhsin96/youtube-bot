@@ -23,6 +23,7 @@ from graphs.ask_graph import (
     make_initial_state,
 )
 from graphs.ingest_graph import IngestState, build_graph
+from src.api_secrets import clear_api_key, get_openai_key, set_api_key
 from src.chain import answer_question
 from src.config import Settings, load_settings
 from src.embeddings import get_embeddings
@@ -35,7 +36,6 @@ from src.error_envelope import (
 )
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
-from src.secrets import clear_api_key, get_openai_key, set_api_key
 from src.vector_store import collection_exists
 
 logger = structlog.get_logger(__name__)
