@@ -6,7 +6,7 @@ request/response shapes are exercised end-to-end against a real FastAPI app.
 
 import contextlib
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -311,13 +311,26 @@ class TestQueryStreamEndpoint:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
+    @patch("src.main.build_ask_graph")
     @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.build_retriever")
     @patch("src.main.get_embeddings")
-    def test_no_chunks_emits_refusal_done_event(self, _mock_emb, mock_br, _mock_ce, client):
-        mock_retriever = MagicMock()
-        mock_retriever.invoke.return_value = []
-        mock_br.return_value = mock_retriever
+    def test_no_chunks_emits_refusal_done_event(self, _mock_emb, _mock_ce, mock_build, client):
+        async def fake_astream_events(state, **kwargs):
+            yield {
+                "event": "on_chain_end",
+                "name": "LangGraph",
+                "data": {
+                    "output": {
+                        "error": None,
+                        "answer": "I'm sorry, that information isn't available in the video transcript.",
+                        "refused": True,
+                        "citations": [],
+                        "tokens_used": None,
+                    }
+                },
+            }
+
+        mock_build.return_value.astream_events = fake_astream_events
 
         resp = client.post("/query", json={"video_id": "vid1", "question": "q?", "stream": True})
         assert resp.status_code == 200
@@ -329,38 +342,47 @@ class TestQueryStreamEndpoint:
         assert done["citations"] == []
         assert "isn't available" in done["answer"]
 
+    @patch("src.main.build_ask_graph")
     @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.build_retriever")
     @patch("src.main.get_embeddings")
-    def test_happy_path_emits_token_and_done_events(self, _mock_emb, mock_br, _mock_ce, client):
-        from langchain_core.documents import Document
+    def test_happy_path_emits_token_and_done_events(self, _mock_emb, _mock_ce, mock_build, client):
         from langchain_core.messages import AIMessageChunk
-        from langchain_core.outputs import ChatGenerationChunk
-        from langchain_openai import ChatOpenAI
 
-        doc = Document(
-            page_content="hello world",
-            metadata={"chunk_id": "c1", "start_ts": 5.0, "end_ts": 10.0},
-        )
-        mock_retriever = MagicMock()
-        mock_retriever.invoke.return_value = [doc]
-        mock_br.return_value = mock_retriever
-
-        async def fake_astream(self_llm, messages, stop=None, run_manager=None, **kwargs):
+        async def fake_astream_events(state, **kwargs):
             for content in ["The ", "answer."]:
-                chunk = ChatGenerationChunk(message=AIMessageChunk(content=content))
-                if run_manager:
-                    await run_manager.on_llm_new_token(content, chunk=chunk)
-                yield chunk
+                yield {
+                    "event": "on_chat_model_stream",
+                    "metadata": {"langgraph_node": "generate"},
+                    "data": {"chunk": AIMessageChunk(content=content)},
+                }
+            yield {
+                "event": "on_chain_end",
+                "name": "LangGraph",
+                "data": {
+                    "output": {
+                        "error": None,
+                        "answer": "The answer.",
+                        "refused": False,
+                        "citations": [
+                            {
+                                "chunk_id": "c1",
+                                "start_ts": 5.0,
+                                "end_ts": 10.0,
+                                "text": "hello world",
+                            }
+                        ],
+                        "tokens_used": 50,
+                    }
+                },
+            }
 
-        with patch.object(ChatOpenAI, "_astream", fake_astream):
-            resp = client.post(
-                "/query", json={"video_id": "vid1", "question": "q?", "stream": True}
-            )
+        mock_build.return_value.astream_events = fake_astream_events
 
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?", "stream": True})
         assert resp.status_code == 200
         events = _parse_sse(resp.text)
         types = [e["type"] for e in events]
+        assert "token" in types
         assert "done" in types
 
         done = next(e for e in events if e["type"] == "done")
@@ -368,67 +390,56 @@ class TestQueryStreamEndpoint:
         assert "answer" in done
         assert "tokens_used" in done
 
+    @patch("src.main.build_ask_graph")
     @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.build_retriever")
     @patch("src.main.get_embeddings")
     def test_done_event_citations_match_retrieved_chunks(
-        self, _mock_emb, mock_br, _mock_ce, client
+        self, _mock_emb, _mock_ce, mock_build, client
     ):
-        from langchain_core.documents import Document
-        from langchain_core.messages import AIMessageChunk
-        from langchain_core.outputs import ChatGenerationChunk
-        from langchain_openai import ChatOpenAI
+        async def fake_astream_events(state, **kwargs):
+            yield {
+                "event": "on_chain_end",
+                "name": "LangGraph",
+                "data": {
+                    "output": {
+                        "error": None,
+                        "answer": "Answer text.",
+                        "refused": False,
+                        "citations": [
+                            {
+                                "chunk_id": "cX",
+                                "start_ts": 1.0,
+                                "end_ts": 5.0,
+                                "text": "transcript text",
+                            }
+                        ],
+                        "tokens_used": None,
+                    }
+                },
+            }
 
-        doc = Document(
-            page_content="transcript text",
-            metadata={"chunk_id": "cX", "start_ts": 1.0, "end_ts": 5.0},
-        )
-        mock_retriever = MagicMock()
-        mock_retriever.invoke.return_value = [doc]
-        mock_br.return_value = mock_retriever
+        mock_build.return_value.astream_events = fake_astream_events
 
-        async def fake_astream(self_llm, messages, stop=None, run_manager=None, **kwargs):
-            chunk = ChatGenerationChunk(message=AIMessageChunk(content="Answer text."))
-            if run_manager:
-                await run_manager.on_llm_new_token("Answer text.", chunk=chunk)
-            yield chunk
-
-        with patch.object(ChatOpenAI, "_astream", fake_astream):
-            resp = client.post(
-                "/query", json={"video_id": "vid1", "question": "q?", "stream": True}
-            )
-
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?", "stream": True})
         events = _parse_sse(resp.text)
         done = next(e for e in events if e["type"] == "done")
 
         assert len(done["citations"]) == 1
         assert done["citations"][0]["chunk_id"] == "cX"
 
+    @patch("src.main.build_ask_graph")
     @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.build_retriever")
     @patch("src.main.get_embeddings")
-    def test_llm_exception_emits_error_sse_event(self, _mock_emb, mock_br, _mock_ce, client):
-        """LLM failure inside event_stream emits an error SSE event instead of crashing."""
-        from langchain_core.documents import Document
-        from langchain_openai import ChatOpenAI
+    def test_llm_exception_emits_error_sse_event(self, _mock_emb, _mock_ce, mock_build, client):
+        """LLM failure inside the graph stream emits an error SSE event instead of crashing."""
 
-        doc = Document(
-            page_content="transcript text",
-            metadata={"chunk_id": "c1", "start_ts": 1.0, "end_ts": 5.0},
-        )
-        mock_retriever = MagicMock()
-        mock_retriever.invoke.return_value = [doc]
-        mock_br.return_value = mock_retriever
-
-        async def raising_astream(self_llm, messages, stop=None, run_manager=None, **kwargs):
+        async def raising_astream_events(state, **kwargs):
             raise RuntimeError("openai network error")
             yield  # pragma: no cover — makes this an async generator
 
-        with patch.object(ChatOpenAI, "_astream", raising_astream):
-            resp = client.post(
-                "/query", json={"video_id": "vid1", "question": "q?", "stream": True}
-            )
+        mock_build.return_value.astream_events = raising_astream_events
 
+        resp = client.post("/query", json={"video_id": "vid1", "question": "q?", "stream": True})
         assert resp.status_code == 200
         events = _parse_sse(resp.text)
         error_events = [e for e in events if e.get("type") == "error"]

@@ -125,7 +125,7 @@ def build_ask_graph(settings, embeddings, *, api_key: str | None = None):
         "model": chat_model_name,
         "openai_api_key": openai_api_key,
         "temperature": 0.2,
-        "streaming": False,
+        "streaming": True,
     }
     if openai_api_base:
         llm_kwargs["base_url"] = openai_api_base

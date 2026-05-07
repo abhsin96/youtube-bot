@@ -12,13 +12,10 @@ from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI
 from langsmith import traceable, uuid7
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from graphs.ask_graph import REFUSAL_SENTINEL as _REFUSAL_SENTINEL
 from graphs.ask_graph import (
     VIDEO_NOT_INGESTED,
     AskState,
@@ -26,13 +23,7 @@ from graphs.ask_graph import (
     make_initial_state,
 )
 from graphs.ingest_graph import IngestState, build_graph
-from src.chain import (
-    _format_context,
-    _load_system_prompt,
-    _trim_to_budget,
-    answer_question,
-    build_chat_prompt,
-)
+from src.chain import answer_question
 from src.config import Settings, load_settings
 from src.embeddings import get_embeddings
 from src.error_envelope import (
@@ -44,7 +35,6 @@ from src.error_envelope import (
 )
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
-from src.retriever import build_retriever
 from src.secrets import clear_api_key, get_openai_key, set_api_key
 from src.vector_store import collection_exists
 
@@ -86,81 +76,44 @@ def _run_answer_question(*args, **kwargs):
     return answer_question(*args, **kwargs)
 
 
-async def _stream_answer(
-    video_id: str,
-    question: str,
-    history: list,
-    k: int,
-    s: Settings,
-    key: str,
-    emb,
+async def _stream_graph_answer(
+    graph,
+    state: AskState,
     thread_id: str,
-    endpoint: str,
+    video_id: str,
 ) -> AsyncIterator[str]:
-    """SSE token-stream generator for /query?stream=true.
+    """SSE token-stream generator using graph.astream_events().
 
     Callers must validate that the collection exists and raise HTTP errors
     *before* iterating this generator — any error raised here arrives after
     the 200 OK header has already been flushed, so it becomes an SSE error
     frame rather than an HTTP error response.
     """
-    retriever = build_retriever(
-        video_id,
-        emb,
-        s.vector_db_path,
-        k=k,
-        score_threshold=s.min_similarity_threshold,
-    )
-    chunks = retriever.invoke(question)
-
-    system = _load_system_prompt()
-    trimmed = (
-        _trim_to_budget(chunks, system, history, question, s.chat_model, s.context_budget_tokens)
-        if chunks
-        else []
-    )
-
-    citations = [
-        {
-            "chunk_id": doc.metadata.get("chunk_id"),
-            "start_ts": doc.metadata.get("start_ts"),
-            "end_ts": doc.metadata.get("end_ts"),
-            "text": doc.page_content,
-        }
-        for doc in trimmed
-    ]
-
+    final_output = None
     try:
-        if not trimmed:
-            refusal = "I'm sorry, that information isn't available in the video transcript."
-            yield f"data: {json.dumps({'type': 'done', 'answer': refusal, 'citations': [], 'tokens_used': None, 'refused': True, 'thread_id': thread_id})}\n\n"
+        async for event in graph.astream_events(state, version="v2"):
+            kind = event["event"]
+            if kind == "on_chat_model_stream":
+                node = event.get("metadata", {}).get("langgraph_node", "")
+                if node == "generate":
+                    chunk = event["data"].get("chunk")
+                    token = chunk.content if chunk and hasattr(chunk, "content") else ""
+                    if token:
+                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+            elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+                final_output = event["data"].get("output")
+
+        if final_output is None:
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'Graph produced no output.'})}\n\n"
             return
 
-        stream_kwargs: dict = {
-            "model": s.chat_model,
-            "openai_api_key": key,
-            "temperature": 0.2,
-            "streaming": True,
-        }
-        if s.openai_api_base:
-            stream_kwargs["base_url"] = s.openai_api_base
-        streaming_llm = ChatOpenAI(**stream_kwargs)
-        chain = build_chat_prompt() | streaming_llm | StrOutputParser()
-        full_answer = ""
-        async for token in chain.astream(
-            {
-                "context": _format_context(trimmed),
-                "question": question,
-                "history": history,
-            }
-        ):
-            full_answer += token
-            yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+        if final_output.get("error"):
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': final_output['error']})}\n\n"
+            return
 
-        refused = _REFUSAL_SENTINEL.lower() in full_answer.lower()
-        yield f"data: {json.dumps({'type': 'done', 'answer': full_answer, 'citations': citations, 'tokens_used': None, 'refused': refused, 'thread_id': thread_id})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'answer': final_output.get('answer', ''), 'citations': final_output.get('citations', []), 'tokens_used': final_output.get('tokens_used'), 'refused': final_output.get('refused', False), 'thread_id': thread_id})}\n\n"
     except Exception:
-        logger.exception("stream_error", video_id=video_id, endpoint=endpoint)
+        logger.exception("stream_graph_error", video_id=video_id)
         yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
 
 
@@ -489,22 +442,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _handle_streaming_query(
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str
     ) -> StreamingResponse:
-        """Streaming Q&A with Server-Sent Events."""
+        """Streaming Q&A via the ask graph with Server-Sent Events."""
         if not collection_exists(body.video_id, s.vector_db_path):
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
+        graph = _get_or_rebuild_ask_graph(app, s, key, emb)
+        state = make_initial_state(
+            video_id=body.video_id,
+            question=body.question,
+            history=_to_langchain_history(body.conversation_history, s.max_history_turns),
+            k=body.k,
+        )
         return StreamingResponse(
-            _stream_answer(
-                video_id=body.video_id,
-                question=body.question,
-                history=_to_langchain_history(body.conversation_history, s.max_history_turns),
-                k=body.k,
-                s=s,
-                key=key,
-                emb=emb,
-                thread_id=thread_id,
-                endpoint="/query",
-            ),
+            _stream_graph_answer(graph, state, thread_id, body.video_id),
             media_type="text/event-stream",
         )
 
