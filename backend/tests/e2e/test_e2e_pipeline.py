@@ -201,6 +201,21 @@ class TestIngestE2E:
         assert body["status"] == "skipped"
         assert body["cached"] is True
 
+    def test_ingest_stream_emits_sse_content_type(
+        self, e2e_settings, chroma_client, mock_openai_url
+    ):
+        from src.main import create_app
+
+        client = TestClient(
+            create_app(e2e_settings, chroma_client=chroma_client),
+            raise_server_exceptions=False,
+        )
+        with patch("graphs.ingest_graph.fetch_transcript", return_value=FIXTURE_SEGMENTS):
+            resp = client.post("/ingest", json={"video_id": "stream_type_01", "stream": True})
+
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
     def test_ingest_force_reruns_pipeline(self, e2e_settings, chroma_client, mock_openai_url):
         from src.main import create_app
 
@@ -216,3 +231,59 @@ class TestIngestE2E:
 
         assert resp.status_code == 200
         assert resp.json()["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# POST /ingest (stream=true) — SSE progress path
+# ---------------------------------------------------------------------------
+
+
+class TestIngestStreamE2E:
+    def _stream_client(self, e2e_settings, chroma_client):
+        from src.main import create_app
+
+        return TestClient(
+            create_app(e2e_settings, chroma_client=chroma_client),
+            raise_server_exceptions=False,
+        )
+
+    def test_stream_emits_all_four_progress_steps(
+        self, e2e_settings, chroma_client, mock_openai_url
+    ):
+        client = self._stream_client(e2e_settings, chroma_client)
+        with patch("graphs.ingest_graph.fetch_transcript", return_value=FIXTURE_SEGMENTS):
+            resp = client.post("/ingest", json={"video_id": "stream_steps_01", "stream": True})
+
+        events = _parse_sse(resp.text)
+        steps = [e["step"] for e in events if e.get("type") == "progress"]
+        assert steps == ["fetch_transcript", "chunk", "embed", "store"]
+
+    def test_stream_progress_pct_values(self, e2e_settings, chroma_client, mock_openai_url):
+        client = self._stream_client(e2e_settings, chroma_client)
+        with patch("graphs.ingest_graph.fetch_transcript", return_value=FIXTURE_SEGMENTS):
+            resp = client.post("/ingest", json={"video_id": "stream_pct_01", "stream": True})
+
+        events = _parse_sse(resp.text)
+        pcts = [e["pct"] for e in events if e.get("type") == "progress"]
+        assert pcts == [20, 40, 70, 90]
+
+    def test_stream_done_event_shape(self, e2e_settings, chroma_client, mock_openai_url):
+        client = self._stream_client(e2e_settings, chroma_client)
+        with patch("graphs.ingest_graph.fetch_transcript", return_value=FIXTURE_SEGMENTS):
+            resp = client.post("/ingest", json={"video_id": "stream_done_01", "stream": True})
+
+        events = _parse_sse(resp.text)
+        done = next(e for e in events if e.get("type") == "done")
+        assert done["status"] == "done"
+        assert done["chunk_count"] > 0
+        assert done["cached"] is False
+
+    def test_stream_cached_video_skips_progress_emits_done(self, e2e_client: TestClient):
+        resp = e2e_client.post("/ingest", json={"video_id": FIXTURE_VIDEO_ID, "stream": True})
+
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert not any(e.get("type") == "progress" for e in events)
+        done = next(e for e in events if e.get("type") == "done")
+        assert done["cached"] is True
+        assert done["chunk_count"] == 0

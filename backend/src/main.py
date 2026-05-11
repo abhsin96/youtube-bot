@@ -36,7 +36,16 @@ from graphs.ask_graph import (
     build_ask_graph,
     make_initial_state,
 )
-from graphs.ingest_graph import IngestState, build_graph
+from graphs.ingest_graph import (
+    IngestState,
+    build_graph,
+    chunk_node,
+    embed_node,
+    fetch_metadata_node,
+    fetch_transcript_node,
+    idempotency_check_node,
+    store_node,
+)
 from src.api_secrets import clear_api_key, get_openai_key, set_api_key
 from src.chain import answer_question
 from src.config import Settings, load_settings
@@ -143,6 +152,71 @@ async def _stream_graph_answer(
         yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
 
 
+async def _stream_ingest_progress(
+    initial_state: IngestState,
+    *,
+    video_id: str,
+) -> AsyncIterator[str]:
+    """SSE progress-stream generator for the ingestion pipeline.
+
+    Runs each graph node in the threadpool and emits a progress event before
+    each expensive stage, then a final 'done' event on success.  Errors that
+    arise after the 200 OK header has been flushed are surfaced as SSE error
+    frames rather than HTTP errors.
+    """
+    try:
+        state: dict = dict(initial_state)
+
+        result = await run_in_threadpool(idempotency_check_node, state)
+        state.update(result)
+
+        if state["status"] == "skipped":
+            yield f"data: {json.dumps({'type': 'done', 'status': 'done', 'chunk_count': 0, 'cached': True})}\n\n"
+            return
+
+        if state["status"] == "error":
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INGEST_FAILED', 'message': state.get('error') or 'Ingestion failed'})}\n\n"
+            return
+
+        meta_result = await run_in_threadpool(fetch_metadata_node, state)
+        state.update(meta_result)
+
+        yield f"data: {json.dumps({'type': 'progress', 'step': 'fetch_transcript', 'pct': 20})}\n\n"
+        result = await run_in_threadpool(fetch_transcript_node, state)
+        state.update(result)
+        if state["status"] == "error":
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INGEST_FAILED', 'message': state.get('error') or 'Transcript fetch failed'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'progress', 'step': 'chunk', 'pct': 40})}\n\n"
+        result = await run_in_threadpool(chunk_node, state)
+        state.update(result)
+        if state["status"] == "error":
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INGEST_FAILED', 'message': state.get('error') or 'Chunking failed'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'progress', 'step': 'embed', 'pct': 70})}\n\n"
+        result = await run_in_threadpool(embed_node, state)
+        state.update(result)
+        if state["status"] == "error":
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INGEST_FAILED', 'message': state.get('error') or 'Embedding failed'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'progress', 'step': 'store', 'pct': 90})}\n\n"
+        result = await run_in_threadpool(store_node, state)
+        state.update(result)
+        if state["status"] == "error":
+            yield f"data: {json.dumps({'type': 'error', 'code': 'INGEST_FAILED', 'message': state.get('error') or 'Store failed'})}\n\n"
+            return
+
+        chunk_count = len(state.get("chunks") or [])
+        yield f"data: {json.dumps({'type': 'done', 'status': 'done', 'chunk_count': chunk_count, 'cached': False})}\n\n"
+
+    except Exception:
+        logger.exception("stream_ingest_error", video_id=video_id)
+        yield f"data: {json.dumps({'type': 'error', 'code': 'INGEST_FAILED', 'message': 'An unexpected error occurred.'})}\n\n"
+
+
 def _get_or_rebuild_ask_graph(app: FastAPI, settings: Settings, key: str, emb):
     """Return the cached compiled ask graph, rebuilding when the API key changes.
 
@@ -183,6 +257,7 @@ async def lifespan(app: FastAPI):
 class IngestRequest(BaseModel):
     video_id: str = Field(..., min_length=1, description="YouTube video ID")
     force: bool = Field(False, description="Re-ingest even if collection already exists")
+    stream: bool = Field(False, description="Return SSE progress stream instead of a JSON body")
 
 
 class IngestResponse(BaseModel):
@@ -492,7 +567,7 @@ def create_app(
 
     # --- /ingest ---
 
-    @app.post("/ingest", response_model=IngestResponse)
+    @app.post("/ingest")
     @limiter.limit("10/minute")
     async def ingest(request: Request, body: IngestRequest):
         s: Settings = app.state.settings
@@ -511,6 +586,12 @@ def create_app(
             "status": "pending",
             "error": None,
         }
+
+        if body.stream:
+            return StreamingResponse(
+                _stream_ingest_progress(initial_state, video_id=body.video_id),
+                media_type="text/event-stream",
+            )
 
         traced = await run_in_threadpool(
             _run_ingest_graph,
