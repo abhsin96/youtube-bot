@@ -448,6 +448,179 @@ class TestQueryStreamEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# Server-side history (thread store)
+# ---------------------------------------------------------------------------
+
+
+class TestServerSideHistory:
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_history_appended_after_successful_query(self, _mock_emb, mock_build, client):
+        """A successful /query stores the turn so the next request sees it."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.side_effect = [
+            _graph_result(answer="First answer."),
+            _graph_result(answer="Second answer."),
+        ]
+
+        client.post("/query", json={"video_id": "v", "question": "q1?", "thread_id": "th1"})
+        client.post("/query", json={"video_id": "v", "question": "q2?", "thread_id": "th1"})
+
+        second_call_state = mock_graph.invoke.call_args_list[1][0][0]
+        assert len(second_call_state["history"]) == 2
+        assert isinstance(second_call_state["history"][0], HumanMessage)
+        assert second_call_state["history"][0].content == "q1?"
+        assert isinstance(second_call_state["history"][1], AIMessage)
+        assert second_call_state["history"][1].content == "First answer."
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_server_history_overrides_client_history(self, _mock_emb, mock_build, client):
+        """When a thread exists in the store, client-supplied history is ignored."""
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.side_effect = [
+            _graph_result(answer="stored answer"),
+            _graph_result(answer="second"),
+        ]
+
+        client.post("/query", json={"video_id": "v", "question": "stored q?", "thread_id": "th2"})
+        client.post(
+            "/query",
+            json={
+                "video_id": "v",
+                "question": "q2?",
+                "thread_id": "th2",
+                "conversation_history": [{"role": "user", "content": "WRONG HISTORY"}],
+            },
+        )
+
+        second_state = mock_graph.invoke.call_args_list[1][0][0]
+        assert second_state["history"][0].content == "stored q?"
+        assert second_state["history"][1].content == "stored answer"
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_client_history_seeds_brand_new_thread(self, _mock_emb, mock_build, client):
+        """conversation_history in the request seeds a thread that doesn't exist yet."""
+        from langchain_core.messages import HumanMessage
+
+        mock_build.return_value.invoke.return_value = _graph_result()
+        client.post(
+            "/query",
+            json={
+                "video_id": "v",
+                "question": "q?",
+                "thread_id": "brand-new",
+                "conversation_history": [{"role": "user", "content": "seeded turn"}],
+            },
+        )
+
+        state = mock_build.return_value.invoke.call_args[0][0]
+        assert isinstance(state["history"][0], HumanMessage)
+        assert state["history"][0].content == "seeded turn"
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_history_not_stored_on_graph_error(self, _mock_emb, mock_build, client):
+        """A failed /query (e.g. VIDEO_NOT_INGESTED) does not write to the store."""
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.side_effect = [
+            _graph_result(error=VIDEO_NOT_INGESTED),
+            _graph_result(answer="ok"),
+        ]
+
+        client.post("/query", json={"video_id": "v", "question": "q1?", "thread_id": "th3"})
+        client.post("/query", json={"video_id": "v", "question": "q2?", "thread_id": "th3"})
+
+        second_state = mock_graph.invoke.call_args_list[1][0][0]
+        assert second_state["history"] == []
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_history_cap_per_thread(self, _mock_emb, mock_build, client):
+        """History is evicted when it exceeds max_history_turns pairs per thread."""
+        import chromadb
+
+        from src.config import Settings
+        from src.main import create_app
+
+        small_settings = Settings(openai_api_key="sk-test", max_history_turns=2, _env_file=None)
+        small_client = TestClient(
+            create_app(small_settings, chroma_client=chromadb.EphemeralClient())
+        )
+
+        with (
+            patch("src.main.build_ask_graph") as mock_b,
+            patch("src.main.get_embeddings"),
+        ):
+            mock_b.return_value.invoke.return_value = _graph_result(answer="ans")
+            # 3 turns; after turn 3 the store should evict turn 1 (cap = 2 pairs)
+            for i in range(3):
+                small_client.post(
+                    "/query",
+                    json={"video_id": "v", "question": f"q{i}?", "thread_id": "cap-t"},
+                )
+            # The 4th request receives capped history: only turns 2 and 3
+            small_client.post(
+                "/query",
+                json={"video_id": "v", "question": "q3?", "thread_id": "cap-t"},
+            )
+
+        fourth_state = mock_b.return_value.invoke.call_args_list[3][0][0]
+        assert len(fourth_state["history"]) == 4  # 2 pairs × 2 messages
+        assert fourth_state["history"][0].content == "q1?"
+
+
+# ---------------------------------------------------------------------------
+# DELETE /threads/{thread_id}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteThread:
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_delete_existing_thread_returns_204(self, _mock_emb, mock_build, client):
+        mock_build.return_value.invoke.return_value = _graph_result()
+        client.post("/query", json={"video_id": "v", "question": "q?", "thread_id": "del-t1"})
+
+        resp = client.delete("/threads/del-t1")
+        assert resp.status_code == 204
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_delete_clears_history_for_next_request(self, _mock_emb, mock_build, client):
+        """After DELETE, the next /query sees no history for that thread."""
+        mock_graph = mock_build.return_value
+        mock_graph.invoke.side_effect = [
+            _graph_result(answer="stored ans"),
+            _graph_result(answer="fresh ans"),
+        ]
+
+        client.post("/query", json={"video_id": "v", "question": "q1?", "thread_id": "del-t2"})
+        client.delete("/threads/del-t2")
+        client.post("/query", json={"video_id": "v", "question": "q2?", "thread_id": "del-t2"})
+
+        second_state = mock_graph.invoke.call_args_list[1][0][0]
+        assert second_state["history"] == []
+
+    def test_delete_nonexistent_thread_returns_404(self, client):
+        resp = client.delete("/threads/this-does-not-exist")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "THREAD_NOT_FOUND"
+
+    @patch("src.main.build_ask_graph")
+    @patch("src.main.get_embeddings")
+    def test_delete_is_idempotent_second_call_returns_404(self, _mock_emb, mock_build, client):
+        mock_build.return_value.invoke.return_value = _graph_result()
+        client.post("/query", json={"video_id": "v", "question": "q?", "thread_id": "del-t3"})
+        client.delete("/threads/del-t3")
+        resp = client.delete("/threads/del-t3")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

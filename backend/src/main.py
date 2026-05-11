@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -85,6 +87,10 @@ async def _stream_graph_answer(
     state: AskState,
     thread_id: str,
     video_id: str,
+    *,
+    thread_store: ThreadStore | None = None,
+    question: str = "",
+    max_turns: int = 10,
 ) -> AsyncIterator[str]:
     """SSE token-stream generator using graph.astream_events().
 
@@ -92,6 +98,10 @@ async def _stream_graph_answer(
     *before* iterating this generator — any error raised here arrives after
     the 200 OK header has already been flushed, so it becomes an SSE error
     frame rather than an HTTP error response.
+
+    When *thread_store* is provided, the (question, answer) pair is appended to
+    the store before the ``done`` SSE frame is emitted so that the next request
+    on the same thread immediately sees the updated history.
     """
     final_output = None
     try:
@@ -115,7 +125,11 @@ async def _stream_graph_answer(
             yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': final_output['error']})}\n\n"
             return
 
-        yield f"data: {json.dumps({'type': 'done', 'answer': final_output.get('answer', ''), 'citations': final_output.get('citations', []), 'tokens_used': final_output.get('tokens_used'), 'refused': final_output.get('refused', False), 'thread_id': thread_id})}\n\n"
+        answer = final_output.get("answer", "")
+        if thread_store is not None and answer and question:
+            thread_store.append(thread_id, question, answer, max_turns=max_turns)
+
+        yield f"data: {json.dumps({'type': 'done', 'answer': answer, 'citations': final_output.get('citations', []), 'tokens_used': final_output.get('tokens_used'), 'refused': final_output.get('refused', False), 'thread_id': thread_id})}\n\n"
     except Exception:
         logger.exception("stream_graph_error", video_id=video_id)
         yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
@@ -212,6 +226,41 @@ class ConfigStatusResponse(BaseModel):
     has_key: bool
 
 
+# --- thread store ---
+
+
+class ThreadStore:
+    """In-memory conversation history store keyed by thread_id.
+
+    Each stored entry is a flat list of alternating HumanMessage / AIMessage
+    objects.  The list is capped at *max_turns* turn-pairs (2 × max_turns
+    messages) by evicting the oldest pair whenever the cap is exceeded.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, list[BaseMessage]] = {}
+
+    def get(self, thread_id: str) -> list[BaseMessage]:
+        """Return a copy of the stored history, or [] if the thread is unknown."""
+        return list(self._store.get(thread_id, []))
+
+    def has(self, thread_id: str) -> bool:
+        return thread_id in self._store
+
+    def append(self, thread_id: str, question: str, answer: str, *, max_turns: int) -> None:
+        """Append a (question, answer) pair and evict the oldest when over cap."""
+        msgs = self._store.setdefault(thread_id, [])
+        msgs.append(HumanMessage(content=question))
+        msgs.append(AIMessage(content=answer))
+        cap = max_turns * 2
+        if len(msgs) > cap:
+            self._store[thread_id] = msgs[-cap:]
+
+    def delete(self, thread_id: str) -> bool:
+        """Remove a thread.  Returns True if it existed, False otherwise."""
+        return self._store.pop(thread_id, None) is not None
+
+
 # --- history helpers ---
 
 
@@ -229,6 +278,24 @@ def _to_langchain_history(
         HumanMessage(content=t.content) if t.role == "user" else AIMessage(content=t.content)
         for t in capped
     ]
+
+
+def _resolve_history(
+    thread_store: ThreadStore,
+    thread_id: str,
+    body: QueryRequest,
+    settings: Settings,
+) -> list[BaseMessage]:
+    """Return the conversation history to pass to the ask graph.
+
+    When the thread already exists in the server store the stored history is
+    used and the client-supplied conversation_history is ignored (O(1) payload
+    instead of O(n)).  For brand-new threads the client-supplied history is
+    converted and used to seed the thread.
+    """
+    if thread_store.has(thread_id):
+        return thread_store.get(thread_id)
+    return _to_langchain_history(body.conversation_history, settings.max_history_turns)
 
 
 # --- key resolution ---
@@ -265,6 +332,7 @@ def create_app(
     app.state.settings = settings
     app.state.chroma_client = chroma_client  # None means lazy-init in lifespan
     app.state.ask_graph_cache = {"key_hash": None, "graph": None}
+    app.state.thread_store = ThreadStore()
     app.state.limiter = limiter
 
     async def _rate_limit_handler(_request: Request, _exc: RateLimitExceeded) -> JSONResponse:
@@ -324,6 +392,15 @@ def create_app(
     async def config_status():
         s: Settings = app.state.settings
         return ConfigStatusResponse(has_key=bool(get_openai_key(s)))
+
+    # --- /threads ---
+
+    @app.delete("/threads/{thread_id}", status_code=204)
+    async def delete_thread(thread_id: str):
+        """Clear server-side conversation history for a thread."""
+        store: ThreadStore = app.state.thread_store
+        if not store.delete(thread_id):
+            raise AppError(404, "THREAD_NOT_FOUND", f"Thread '{thread_id}' not found")
 
     # --- /ingest ---
 
@@ -442,12 +519,13 @@ def create_app(
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str, request: Request
     ) -> AskResponse:
         """Advanced Q&A with LangGraph pipeline and guardrails."""
+        thread_store: ThreadStore = app.state.thread_store
         graph = _get_or_rebuild_ask_graph(app, s, key, emb)
 
         state = make_initial_state(
             video_id=body.video_id,
             question=body.question,
-            history=_to_langchain_history(body.conversation_history, s.max_history_turns),
+            history=_resolve_history(thread_store, thread_id, body, s),
             k=body.k,
         )
 
@@ -461,6 +539,13 @@ def create_app(
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
         if result.get("error"):
             raise AppError(500, "INTERNAL_ERROR", result["error"])
+
+        thread_store.append(
+            thread_id,
+            body.question,
+            result["answer"],
+            max_turns=s.max_history_turns,
+        )
 
         return AskResponse(
             answer=result["answer"],
@@ -477,15 +562,24 @@ def create_app(
         if not collection_exists(body.video_id, app.state.chroma_client):
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
+        thread_store: ThreadStore = app.state.thread_store
         graph = _get_or_rebuild_ask_graph(app, s, key, emb)
         state = make_initial_state(
             video_id=body.video_id,
             question=body.question,
-            history=_to_langchain_history(body.conversation_history, s.max_history_turns),
+            history=_resolve_history(thread_store, thread_id, body, s),
             k=body.k,
         )
         return StreamingResponse(
-            _stream_graph_answer(graph, state, thread_id, body.video_id),
+            _stream_graph_answer(
+                graph,
+                state,
+                thread_id,
+                body.video_id,
+                thread_store=thread_store,
+                question=body.question,
+                max_turns=s.max_history_turns,
+            ),
             media_type="text/event-stream",
         )
 
