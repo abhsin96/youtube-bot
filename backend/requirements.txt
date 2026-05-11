@@ -16,6 +16,8 @@ pydantic-settings
 tenacity
 keyring
 slowapi
+redis
+fakeredis
 pytest
 pytest-asyncio
 httpx

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     max_history_turns: int = 10
     context_budget_tokens: int = 6000
 
+    # --- Redis (empty string disables Redis and uses the in-memory thread store) ---
+    redis_url: str = "redis://localhost:6379"
+
     # --- server ---
     version: str = "0.1.0"
     log_level: str = "INFO"

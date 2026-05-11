@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
 import chromadb
+import redis as redis_lib
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
@@ -14,7 +16,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langsmith import traceable, uuid7
 from pydantic import BaseModel, Field
 from slowapi import Limiter
@@ -88,7 +96,7 @@ async def _stream_graph_answer(
     thread_id: str,
     video_id: str,
     *,
-    thread_store: ThreadStore | None = None,
+    thread_store: AnyThreadStore | None = None,
     question: str = "",
     max_turns: int = 10,
 ) -> AsyncIterator[str]:
@@ -164,6 +172,8 @@ async def lifespan(app: FastAPI):
         app.state.chroma_client = get_chroma_client(settings.chroma_host, settings.chroma_port)
     logger.info("server starting", project=settings.langsmith_project)
     yield
+    if (rc := getattr(app.state, "redis_client", None)) is not None:
+        rc.close()
     logger.info("server stopped")
 
 
@@ -261,6 +271,66 @@ class ThreadStore:
         return self._store.pop(thread_id, None) is not None
 
 
+class RedisThreadStore:
+    """Redis-backed conversation history store with the same interface as ThreadStore.
+
+    Messages are serialized with langchain_core's ``messages_to_dict`` /
+    ``messages_from_dict`` and stored as individual JSON strings in a Redis list.
+
+    List layout (LPUSH → newest pair at the head):
+        [q_new, a_new, q_prev, a_prev, ...]
+
+    ``get()`` reads the list and reconstructs chronological order by reading
+    pairs from the tail.  ``append()`` uses a pipeline so the LPUSH and LTRIM
+    are sent in a single round-trip.
+    """
+
+    _KEY_PREFIX = "thread:"
+
+    def __init__(self, client: redis_lib.Redis) -> None:  # type: ignore[type-arg]
+        self._client = client
+
+    def _key(self, thread_id: str) -> str:
+        return f"{self._KEY_PREFIX}{thread_id}"
+
+    def get(self, thread_id: str) -> list[BaseMessage]:
+        """Return conversation history in chronological order, or [] if unknown."""
+        raw: list[str] = self._client.lrange(self._key(thread_id), 0, -1)
+        if not raw:
+            return []
+        # List is newest-pair-first (head = most recent).  Read pairs from the
+        # tail to restore chronological order without loading all data twice.
+        ordered: list[str] = []
+        for i in range(len(raw) - 2, -1, -2):
+            ordered.append(raw[i])
+            ordered.append(raw[i + 1])
+        return messages_from_dict([json.loads(item) for item in ordered])
+
+    def has(self, thread_id: str) -> bool:
+        return bool(self._client.exists(self._key(thread_id)))
+
+    def append(self, thread_id: str, question: str, answer: str, *, max_turns: int) -> None:
+        """Append a (question, answer) pair and cap the list in a single round-trip."""
+        key = self._key(thread_id)
+        cap = max_turns * 2
+        q_json = json.dumps(messages_to_dict([HumanMessage(content=question)])[0])
+        a_json = json.dumps(messages_to_dict([AIMessage(content=answer)])[0])
+        # Push answer first so that after both LPUSHes the question sits at the
+        # head (lower index) and the pair order is preserved.
+        with self._client.pipeline() as pipe:
+            pipe.lpush(key, a_json, q_json)
+            pipe.ltrim(key, 0, cap - 1)
+            pipe.execute()
+
+    def delete(self, thread_id: str) -> bool:
+        """Remove a thread.  Returns True if it existed, False otherwise."""
+        return bool(self._client.delete(self._key(thread_id)))
+
+
+# Union of all thread-store implementations — used in type annotations.
+AnyThreadStore = ThreadStore | RedisThreadStore
+
+
 # --- history helpers ---
 
 
@@ -281,7 +351,7 @@ def _to_langchain_history(
 
 
 def _resolve_history(
-    thread_store: ThreadStore,
+    thread_store: AnyThreadStore,
     thread_id: str,
     body: QueryRequest,
     settings: Settings,
@@ -324,6 +394,15 @@ def create_app(
     if settings is None:
         settings = load_settings()
 
+    # pydantic_settings reads .env into the Settings object but does NOT write
+    # to os.environ.  The LangSmith SDK reads os.environ directly, so we
+    # propagate the relevant keys here before any LangSmith client is created.
+    # setdefault means explicitly-set shell variables always win over .env.
+    if settings.langsmith_api_key:
+        os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
+    os.environ.setdefault("LANGSMITH_TRACING", settings.langsmith_tracing)
+    os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+
     configure_logging(settings.log_level, json_logs=settings.json_logs)
 
     limiter = Limiter(key_func=get_remote_address)
@@ -332,8 +411,17 @@ def create_app(
     app.state.settings = settings
     app.state.chroma_client = chroma_client  # None means lazy-init in lifespan
     app.state.ask_graph_cache = {"key_hash": None, "graph": None}
-    app.state.thread_store = ThreadStore()
     app.state.limiter = limiter
+
+    if settings.redis_url:
+        rc = redis_lib.from_url(settings.redis_url, decode_responses=True)
+        app.state.thread_store = RedisThreadStore(rc)
+        app.state.redis_client = rc
+        logger.info("thread_store", backend="redis", url=settings.redis_url)
+    else:
+        app.state.thread_store = ThreadStore()
+        app.state.redis_client = None
+        logger.info("thread_store", backend="memory")
 
     async def _rate_limit_handler(_request: Request, _exc: RateLimitExceeded) -> JSONResponse:
         return JSONResponse(
@@ -398,7 +486,7 @@ def create_app(
     @app.delete("/threads/{thread_id}", status_code=204)
     async def delete_thread(thread_id: str):
         """Clear server-side conversation history for a thread."""
-        store: ThreadStore = app.state.thread_store
+        store: AnyThreadStore = app.state.thread_store
         if not store.delete(thread_id):
             raise AppError(404, "THREAD_NOT_FOUND", f"Thread '{thread_id}' not found")
 
@@ -519,7 +607,7 @@ def create_app(
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str, request: Request
     ) -> AskResponse:
         """Advanced Q&A with LangGraph pipeline and guardrails."""
-        thread_store: ThreadStore = app.state.thread_store
+        thread_store: AnyThreadStore = app.state.thread_store
         graph = _get_or_rebuild_ask_graph(app, s, key, emb)
 
         state = make_initial_state(
@@ -562,7 +650,7 @@ def create_app(
         if not collection_exists(body.video_id, app.state.chroma_client):
             raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
-        thread_store: ThreadStore = app.state.thread_store
+        thread_store: AnyThreadStore = app.state.thread_store
         graph = _get_or_rebuild_ask_graph(app, s, key, emb)
         state = make_initial_state(
             video_id=body.video_id,

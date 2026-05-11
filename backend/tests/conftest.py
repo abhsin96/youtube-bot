@@ -2,6 +2,23 @@ import chromadb
 import pytest
 from chromadb.config import Settings as ChromaSettings
 
+_LANGSMITH_ENV_KEYS = (
+    "LANGSMITH_TRACING",
+    "LANGCHAIN_TRACING_V2",
+    "LANGSMITH_API_KEY",
+    "LANGSMITH_PROJECT",
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_langsmith_env(monkeypatch):
+    """Undo the os.environ.setdefault calls that app = create_app() makes at
+    import time (from the .env file).  Without this, tests that create
+    Settings(_env_file=None) still pick up LANGSMITH_TRACING=true from the
+    process environment and fail their assertions about default values."""
+    for key in _LANGSMITH_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
 
 @pytest.fixture(autouse=True)
 def _ephemeral_chroma(monkeypatch, tmp_path):

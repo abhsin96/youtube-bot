@@ -22,7 +22,7 @@ from src.main import create_app
 
 @pytest.fixture()
 def settings():
-    return Settings(openai_api_key="sk-test", _env_file=None)
+    return Settings(openai_api_key="sk-test", redis_url="", _env_file=None)
 
 
 @pytest.fixture()
