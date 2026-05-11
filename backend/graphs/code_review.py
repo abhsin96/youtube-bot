@@ -187,7 +187,7 @@ def main(file_patterns: list[str] | None = None) -> str:
     settings = load_settings()
     files = _collect_files(file_patterns or [])
     if not files:
-        print("No Python files found.")
+        logger.error("no_python_files_found")
         sys.exit(1)
 
     graph = build_graph()

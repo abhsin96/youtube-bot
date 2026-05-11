@@ -1,7 +1,10 @@
 import sys
 
+import structlog
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger(__name__)
 
 
 class Settings(BaseSettings):
@@ -76,6 +79,9 @@ def load_settings() -> Settings:
             for loc in [str(error.get("loc", ["unknown"])[0])]
         ]
         detail = ", ".join(missing_vars) if missing_vars else str(exc)
-        print(f"[startup error] Missing required environment variables: {detail}", file=sys.stderr)
-        print("  Check your .env file or environment variables.", file=sys.stderr)
+        logger.error(
+            "startup_error",
+            missing_vars=detail,
+            hint="Check your .env file or environment variables.",
+        )
         sys.exit(1)

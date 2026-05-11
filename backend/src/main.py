@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -120,6 +121,7 @@ async def _stream_graph_answer(
     the store before the ``done`` SSE frame is emitted so that the next request
     on the same thread immediately sees the updated history.
     """
+    t0 = time.perf_counter()
     final_output = None
     try:
         async for event in graph.astream_events(state, version="v2"):
@@ -146,7 +148,16 @@ async def _stream_graph_answer(
         if thread_store is not None and answer and question:
             thread_store.append(thread_id, question, answer, max_turns=max_turns)
 
-        yield f"data: {json.dumps({'type': 'done', 'answer': answer, 'citations': final_output.get('citations', []), 'tokens_used': final_output.get('tokens_used'), 'refused': final_output.get('refused', False), 'thread_id': thread_id})}\n\n"
+        tokens_used = final_output.get("tokens_used")
+        logger.info(
+            "query_completed",
+            video_id=video_id,
+            question=question[:80],
+            duration_ms=round((time.perf_counter() - t0) * 1000),
+            tokens_used=tokens_used,
+            stream=True,
+        )
+        yield f"data: {json.dumps({'type': 'done', 'answer': answer, 'citations': final_output.get('citations', []), 'tokens_used': tokens_used, 'refused': final_output.get('refused', False), 'thread_id': thread_id})}\n\n"
     except Exception:
         logger.exception("stream_graph_error", video_id=video_id)
         yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL_ERROR', 'message': 'An unexpected error occurred.'})}\n\n"
@@ -164,6 +175,7 @@ async def _stream_ingest_progress(
     arise after the 200 OK header has been flushed are surfaced as SSE error
     frames rather than HTTP errors.
     """
+    t0 = time.perf_counter()
     try:
         state: dict = dict(initial_state)
 
@@ -171,6 +183,14 @@ async def _stream_ingest_progress(
         state.update(result)
 
         if state["status"] == "skipped":
+            logger.info(
+                "ingest_completed",
+                video_id=video_id,
+                duration_ms=round((time.perf_counter() - t0) * 1000),
+                chunk_count=0,
+                cached=True,
+                stream=True,
+            )
             yield f"data: {json.dumps({'type': 'done', 'status': 'done', 'chunk_count': 0, 'cached': True})}\n\n"
             return
 
@@ -210,6 +230,14 @@ async def _stream_ingest_progress(
             return
 
         chunk_count = len(state.get("chunks") or [])
+        logger.info(
+            "ingest_completed",
+            video_id=video_id,
+            duration_ms=round((time.perf_counter() - t0) * 1000),
+            chunk_count=chunk_count,
+            cached=False,
+            stream=True,
+        )
         yield f"data: {json.dumps({'type': 'done', 'status': 'done', 'chunk_count': chunk_count, 'cached': False})}\n\n"
 
     except Exception:
@@ -574,6 +602,9 @@ def create_app(
         key = _resolve_key(s)
         embeddings = get_embeddings(s, api_key=key)
 
+        logger.info("ingest_started", video_id=body.video_id, stream=body.stream)
+        t0 = time.perf_counter()
+
         initial_state: IngestState = {
             "video_id": body.video_id,
             "force": body.force,
@@ -603,11 +634,20 @@ def create_app(
         if traced["status"] == "error":
             raise AppError(502, "INGEST_FAILED", traced["error"] or "Ingestion failed")
 
-        return IngestResponse(
+        response = IngestResponse(
             status=traced["status"],
             chunk_count=traced["chunk_count"],
             cached=traced["status"] == "skipped",
         )
+        logger.info(
+            "ingest_completed",
+            video_id=body.video_id,
+            duration_ms=round((time.perf_counter() - t0) * 1000),
+            chunk_count=response.chunk_count,
+            cached=response.cached,
+            stream=False,
+        )
+        return response
 
     # --- /query endpoint ---
 
@@ -631,9 +671,11 @@ def create_app(
 
         # Generate or use provided thread_id for conversation tracking
         thread_id = body.thread_id or str(uuid7())
+        t0 = time.perf_counter()
         logger.info(
             "query_started",
             video_id=body.video_id,
+            question=body.question[:80],
             thread_id=thread_id,
             stream=body.stream,
             advanced=body.advanced,
@@ -645,9 +687,18 @@ def create_app(
 
         # Route to advanced (graph-based) or simple mode
         if body.advanced:
-            return await _handle_advanced_query(body, s, key, emb, thread_id, request)
+            result = await _handle_advanced_query(body, s, key, emb, thread_id, request)
         else:
-            return await _handle_simple_query(body, s, key, emb, thread_id, request)
+            result = await _handle_simple_query(body, s, key, emb, thread_id, request)
+
+        logger.info(
+            "query_completed",
+            video_id=body.video_id,
+            question=body.question[:80],
+            duration_ms=round((time.perf_counter() - t0) * 1000),
+            tokens_used=getattr(result, "tokens_used", None),
+        )
+        return result
 
     async def _handle_simple_query(
         body: QueryRequest, s: Settings, key: str, emb, thread_id: str, request: Request

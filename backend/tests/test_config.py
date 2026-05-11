@@ -88,7 +88,9 @@ def test_load_settings_happy_path(monkeypatch):
 # --- load_settings error path ---
 
 
-def test_load_settings_exits_on_missing_key(capsys):
+def test_load_settings_exits_on_missing_key(caplog):
+    import logging
+
     side_effect = ValidationError.from_exception_data(
         "Settings",
         [{"type": "missing", "loc": ("openai_api_key",), "msg": "Field required", "input": {}}],
@@ -96,8 +98,9 @@ def test_load_settings_exits_on_missing_key(capsys):
     with (
         patch("src.config.Settings", side_effect=side_effect),
         pytest.raises(SystemExit) as exc_info,
+        caplog.at_level(logging.ERROR),
     ):
         load_settings()
 
     assert exc_info.value.code == 1
-    assert "OPENAI_API_KEY" in capsys.readouterr().err
+    assert "OPENAI_API_KEY" in caplog.text
