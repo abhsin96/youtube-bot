@@ -6,7 +6,6 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal
 
 import chromadb
 import redis as redis_lib
@@ -25,7 +24,6 @@ from langchain_core.messages import (
     messages_to_dict,
 )
 from langsmith import traceable, uuid7
-from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -60,6 +58,16 @@ from src.error_envelope import (
 )
 from src.logging_config import configure_logging
 from src.middleware import RequestIDMiddleware
+from src.schemas import (
+    ApiKeyRequest,
+    AskResponse,
+    ConfigStatusResponse,
+    ConversationTurn,
+    IngestRequest,
+    IngestResponse,
+    QueryRequest,
+    QuestionResponse,
+)
 from src.vector_store import collection_exists, get_chroma_client
 
 logger = structlog.get_logger(__name__)
@@ -277,66 +285,6 @@ async def lifespan(app: FastAPI):
     if (rc := getattr(app.state, "redis_client", None)) is not None:
         rc.close()
     logger.info("server stopped")
-
-
-# --- request / response models ---
-
-
-class IngestRequest(BaseModel):
-    video_id: str = Field(..., min_length=1, description="YouTube video ID")
-    force: bool = Field(False, description="Re-ingest even if collection already exists")
-    stream: bool = Field(False, description="Return SSE progress stream instead of a JSON body")
-
-
-class IngestResponse(BaseModel):
-    status: str
-    chunk_count: int
-    cached: bool
-
-
-class QuestionResponse(BaseModel):
-    answer: str
-    sources: list[dict]
-
-
-class ConversationTurn(BaseModel):
-    role: Literal["user", "assistant"] = Field(..., description="Speaker role")
-    content: str = Field(..., min_length=1, description="Message text")
-
-
-class QueryRequest(BaseModel):
-    video_id: str = Field(..., min_length=1, description="YouTube video ID")
-    question: str = Field(..., min_length=1, description="Question about the video")
-    stream: bool = Field(False, description="Enable streaming response")
-    advanced: bool = Field(True, description="Use advanced graph-based pipeline")
-    conversation_history: list[ConversationTurn] = Field(
-        default_factory=list, description="Prior turn messages"
-    )
-    k: int = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
-    thread_id: str | None = Field(None, description="Thread ID for conversation tracking")
-
-
-class CitationSchema(BaseModel):
-    chunk_id: str | None = None
-    start_ts: float | None = None
-    end_ts: float | None = None
-    text: str
-
-
-class AskResponse(BaseModel):
-    answer: str
-    citations: list[CitationSchema]
-    tokens_used: int | None = None
-    refused: bool = False
-    thread_id: str
-
-
-class ApiKeyRequest(BaseModel):
-    api_key: str = Field(..., min_length=1, description="OpenAI API key")
-
-
-class ConfigStatusResponse(BaseModel):
-    has_key: bool
 
 
 # --- thread store ---
