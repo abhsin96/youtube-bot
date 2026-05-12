@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from graphs.code_review import (
+from scripts.code_review import (
     ReviewState,
     _collect_files,
     _route_after_review,
@@ -70,7 +70,7 @@ def test_review_file_pops_first_file(tmp_path):
     f.write_text("x = 1\n")
     state = _state(files=[str(f), "other.py"])
 
-    with patch("graphs.code_review._llm", return_value=_mock_llm("No issues found.")):
+    with patch("scripts.code_review._llm", return_value=_mock_llm("No issues found.")):
         delta = review_file(state)
 
     assert str(f) not in delta["files"]
@@ -82,7 +82,7 @@ def test_review_file_appends_finding(tmp_path):
     f.write_text("pass\n")
     state = _state(files=[str(f)])
 
-    with patch("graphs.code_review._llm", return_value=_mock_llm("[HIGH] line 1 — bad")):
+    with patch("scripts.code_review._llm", return_value=_mock_llm("[HIGH] line 1 — bad")):
         delta = review_file(state)
 
     assert len(delta["findings"]) == 1
@@ -102,7 +102,7 @@ def test_review_file_passes_source_to_llm(tmp_path):
     state = _state(files=[str(f)])
 
     mock = _mock_llm("No issues found.")
-    with patch("graphs.code_review._llm", return_value=mock):
+    with patch("scripts.code_review._llm", return_value=mock):
         review_file(state)
 
     call_args = mock.invoke.call_args[0][0]
@@ -121,7 +121,7 @@ def test_summarise_sets_summary():
             {"path": "b.py", "issues": "No issues found."},
         ]
     )
-    with patch("graphs.code_review._llm", return_value=_mock_llm("Overall: NEEDS WORK")):
+    with patch("scripts.code_review._llm", return_value=_mock_llm("Overall: NEEDS WORK")):
         delta = summarise(state)
 
     assert delta["summary"] == "Overall: NEEDS WORK"
@@ -135,7 +135,7 @@ def test_summarise_includes_all_findings_in_prompt():
         ]
     )
     mock = _mock_llm("verdict")
-    with patch("graphs.code_review._llm", return_value=mock):
+    with patch("scripts.code_review._llm", return_value=mock):
         summarise(state)
 
     prompt_text = str(mock.invoke.call_args)
@@ -156,7 +156,7 @@ def test_graph_processes_all_files(tmp_path):
         files.append(str(f))
 
     mock = _mock_llm("No issues found.")
-    with patch("graphs.code_review._llm", return_value=mock):
+    with patch("scripts.code_review._llm", return_value=mock):
         graph = build_graph()
         result = graph.invoke(_state(files=files))
 
@@ -168,14 +168,14 @@ def test_graph_summary_populated(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("pass\n")
 
-    with patch("graphs.code_review._llm", return_value=_mock_llm("GOOD")):
+    with patch("scripts.code_review._llm", return_value=_mock_llm("GOOD")):
         result = build_graph().invoke(_state(files=[str(f)]))
 
     assert result["summary"] == "GOOD"
 
 
 def test_graph_empty_file_list_skips_review():
-    with patch("graphs.code_review._llm", return_value=_mock_llm("nothing")):
+    with patch("scripts.code_review._llm", return_value=_mock_llm("nothing")):
         result = build_graph().invoke(_state(files=[]))
 
     assert result["findings"] == []

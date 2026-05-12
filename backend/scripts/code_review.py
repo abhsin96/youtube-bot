@@ -9,7 +9,7 @@ FileFinding to the state.  Once all files are reviewed the graph transitions
 to summarise, which asks the LLM to produce a ranked, actionable report.
 
 Usage:
-    python graphs/code_review.py [file_or_glob ...]
+    python scripts/code_review.py [file_or_glob ...]
 
     Defaults to reviewing every *.py file under src/.
 """
