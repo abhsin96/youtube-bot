@@ -9,7 +9,7 @@ import fakeredis
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.main import RedisThreadStore, ThreadStore
+from src.stores.thread_store import RedisThreadStore, ThreadStore
 
 # ---------------------------------------------------------------------------
 # Fixtures

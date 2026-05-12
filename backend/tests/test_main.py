@@ -150,7 +150,7 @@ _TRACED_ERROR = {
 
 
 def test_ingest_returns_200_on_done(client):
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE):
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_DONE):
         resp = client.post("/ingest", json={"video_id": "vid1"})
     assert resp.status_code == 200
     body = resp.json()
@@ -160,7 +160,7 @@ def test_ingest_returns_200_on_done(client):
 
 
 def test_ingest_cached_true_when_skipped(client):
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_SKIPPED):
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_SKIPPED):
         resp = client.post("/ingest", json={"video_id": "vid1"})
     assert resp.status_code == 200
     body = resp.json()
@@ -169,7 +169,7 @@ def test_ingest_cached_true_when_skipped(client):
 
 
 def test_ingest_502_on_graph_error(client):
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_ERROR):
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_ERROR):
         resp = client.post("/ingest", json={"video_id": "vid1"})
     assert resp.status_code == 502
     assert "transcript disabled" in resp.json()["error"]["message"]
@@ -186,7 +186,7 @@ def test_ingest_422_on_missing_video_id(client):
 
 
 def test_ingest_force_passed_to_graph_state(client):
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
         client.post("/ingest", json={"video_id": "vid1", "force": True})
     state = mock_fn.call_args[0][0]
     assert state["force"] is True
@@ -196,9 +196,9 @@ def test_ingest_force_passed_to_graph_state(client):
 
 
 def test_run_ingest_graph_passes_video_id_to_langsmith():
-    with patch("src.main.build_graph") as mock_build:
+    with patch("src.routers.ingest.build_graph") as mock_build:
         mock_build.return_value.invoke.return_value = _GRAPH_DONE
-        from src.main import _run_ingest_graph
+        from src.routers.ingest import _run_ingest_graph
 
         result = _run_ingest_graph(
             _GRAPH_DONE, video_id="my-video", embed_model="text-embedding-3-small"
@@ -207,27 +207,27 @@ def test_run_ingest_graph_passes_video_id_to_langsmith():
 
 
 def test_run_ingest_graph_passes_embed_model_to_langsmith():
-    with patch("src.main.build_graph") as mock_build:
+    with patch("src.routers.ingest.build_graph") as mock_build:
         mock_build.return_value.invoke.return_value = _GRAPH_DONE
-        from src.main import _run_ingest_graph
+        from src.routers.ingest import _run_ingest_graph
 
         result = _run_ingest_graph(_GRAPH_DONE, video_id="v1", embed_model="text-embedding-3-large")
     assert result["embed_model"] == "text-embedding-3-large"
 
 
 def test_run_ingest_graph_chunk_count_matches_graph_output():
-    with patch("src.main.build_graph") as mock_build:
+    with patch("src.routers.ingest.build_graph") as mock_build:
         mock_build.return_value.invoke.return_value = _GRAPH_DONE
-        from src.main import _run_ingest_graph
+        from src.routers.ingest import _run_ingest_graph
 
         result = _run_ingest_graph(_GRAPH_DONE, video_id="v1", embed_model="text-embedding-3-small")
     assert result["chunk_count"] == len(_GRAPH_DONE["chunks"])
 
 
 def test_run_ingest_graph_error_preserved():
-    with patch("src.main.build_graph") as mock_build:
+    with patch("src.routers.ingest.build_graph") as mock_build:
         mock_build.return_value.invoke.return_value = _GRAPH_ERROR
-        from src.main import _run_ingest_graph
+        from src.routers.ingest import _run_ingest_graph
 
         result = _run_ingest_graph(
             _GRAPH_ERROR, video_id="v1", embed_model="text-embedding-3-small"
@@ -237,13 +237,13 @@ def test_run_ingest_graph_error_preserved():
 
 
 def test_ingest_route_passes_embed_model_from_settings(client):
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
         client.post("/ingest", json={"video_id": "vid1"})
     assert mock_fn.call_args.kwargs["embed_model"] == "text-embedding-3-small"
 
 
 def test_ingest_route_passes_video_id_kwarg(client):
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_DONE) as mock_fn:
         client.post("/ingest", json={"video_id": "my-vid"})
     assert mock_fn.call_args.kwargs["video_id"] == "my-vid"
 
@@ -256,7 +256,7 @@ def test_ingest_rate_limit_returns_429_after_10_requests():
 
     settings = Settings(openai_api_key="sk-test", _env_file=None)
     c = TestClient(create_app(settings, chroma_client=chromadb.EphemeralClient()))
-    with patch("src.main._run_ingest_graph", return_value=_TRACED_DONE):
+    with patch("src.routers.ingest._run_ingest_graph", return_value=_TRACED_DONE):
         for _ in range(10):
             resp = c.post("/ingest", json={"video_id": "vid1"})
             assert resp.status_code == 200
@@ -271,7 +271,7 @@ def test_config_api_key_rate_limit_returns_429_after_5_requests():
 
     settings = Settings(openai_api_key="sk-test", _env_file=None)
     c = TestClient(create_app(settings, chroma_client=chromadb.EphemeralClient()))
-    with patch("src.main.set_api_key"):
+    with patch("src.routers.config.set_api_key"):
         for _ in range(5):
             resp = c.post("/config/api-key", json={"api_key": "sk-test"})
             assert resp.status_code == 204

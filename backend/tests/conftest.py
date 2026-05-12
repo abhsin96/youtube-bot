@@ -2,12 +2,27 @@ import chromadb
 import pytest
 from chromadb.config import Settings as ChromaSettings
 
+from src.dependencies import limiter
+
 _LANGSMITH_ENV_KEYS = (
     "LANGSMITH_TRACING",
     "LANGCHAIN_TRACING_V2",
     "LANGSMITH_API_KEY",
     "LANGSMITH_PROJECT",
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Reset the singleton rate-limiter between tests.
+
+    The limiter moved from a per-app instance (created inside create_app) to a
+    module-level singleton in src.dependencies.  Without this reset, hit counts
+    accumulate across the test session and cause false 429 failures.
+    """
+    if hasattr(limiter, "_storage") and hasattr(limiter._storage, "reset"):
+        limiter._storage.reset()
+    yield
 
 
 @pytest.fixture(autouse=True)

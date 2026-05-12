@@ -55,15 +55,15 @@ def _graph_result(
 
 
 class TestQueryEndpoint:
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_happy_path_returns_200(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result()
         resp = client.post("/query", json={"video_id": "vid1", "question": "q?"})
         assert resp.status_code == 200
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_happy_path_response_shape(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result()
         data = client.post("/query", json={"video_id": "vid1", "question": "q?"}).json()
@@ -78,8 +78,8 @@ class TestQueryEndpoint:
         assert cit["end_ts"] == 10.0
         assert cit["text"] == "hello world"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_citations_are_subset_of_retrieved_chunks(self, _mock_emb, mock_build, client):
         all_citations = [
             {"chunk_id": "c1", "start_ts": 5.0, "end_ts": 10.0, "text": "chunk one"},
@@ -92,8 +92,8 @@ class TestQueryEndpoint:
         all_ids = {"c1", "c2"}
         assert returned_ids.issubset(all_ids)
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_not_ingested_returns_404(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result(
             answer="", citations=[], tokens_used=None, error=VIDEO_NOT_INGESTED
@@ -102,8 +102,8 @@ class TestQueryEndpoint:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_refusal_when_no_relevant_chunks(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result(
             answer="I'm sorry, that information isn't available in the video transcript.",
@@ -116,8 +116,8 @@ class TestQueryEndpoint:
         assert data["citations"] == []
         assert "isn't available" in data["answer"]
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_conversation_history_forwarded_to_graph(self, _mock_emb, mock_build, client):
         from langchain_core.messages import HumanMessage
 
@@ -135,8 +135,8 @@ class TestQueryEndpoint:
         assert isinstance(call_state["history"][0], HumanMessage)
         assert call_state["history"][0].content == "prior question"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_k_forwarded_to_graph(self, _mock_emb, mock_build, client):
         mock_graph = mock_build.return_value
         mock_graph.invoke.return_value = _graph_result()
@@ -146,8 +146,8 @@ class TestQueryEndpoint:
         call_state = mock_graph.invoke.call_args[0][0]
         assert call_state["k"] == 3
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_tokens_used_none_is_allowed(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result(tokens_used=None)
         data = client.post("/query", json={"video_id": "vid1", "question": "q?"}).json()
@@ -160,8 +160,8 @@ class TestQueryEndpoint:
 
 
 class TestConversationHistory:
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_invalid_role_returns_422(self, _mock_emb, _mock_build, client):
         resp = client.post(
             "/query",
@@ -173,8 +173,8 @@ class TestConversationHistory:
         )
         assert resp.status_code == 422
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_user_turn_becomes_human_message(self, _mock_emb, mock_build, client):
         from langchain_core.messages import HumanMessage
 
@@ -194,8 +194,8 @@ class TestConversationHistory:
         assert isinstance(history[0], HumanMessage)
         assert history[0].content == "hello"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_assistant_turn_becomes_ai_message(self, _mock_emb, mock_build, client):
         from langchain_core.messages import AIMessage
 
@@ -215,8 +215,8 @@ class TestConversationHistory:
         assert isinstance(history[0], AIMessage)
         assert history[0].content == "hi back"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_cap_enforced_30_turns_yields_10(self, _mock_emb, mock_build, client):
         """Server caps history at max_history_turns (default 10) even when FE sends 30."""
         mock_graph = mock_build.return_value
@@ -236,8 +236,8 @@ class TestConversationHistory:
         history = mock_graph.invoke.call_args[0][0]["history"]
         assert len(history) == 10  # capped to max_history_turns
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_cap_keeps_most_recent_turns(self, _mock_emb, mock_build, client):
         """After capping, the last N messages are kept (not the first N)."""
         mock_graph = mock_build.return_value
@@ -255,8 +255,8 @@ class TestConversationHistory:
         assert history[-1].content == "msg 29"
         assert history[0].content == "msg 20"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_empty_history_is_valid(self, _mock_emb, mock_build, client):
         mock_graph = mock_build.return_value
         mock_graph.invoke.return_value = _graph_result()
@@ -273,8 +273,8 @@ class TestConversationHistory:
 
 
 class TestGraphCaching:
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_graph_built_once_for_same_key(self, _mock_emb, mock_build, client):
         """build_ask_graph is called only once when successive requests share the same key."""
         mock_build.return_value.invoke.return_value = _graph_result()
@@ -282,9 +282,9 @@ class TestGraphCaching:
         client.post("/query", json={"video_id": "v", "question": "q?"})
         assert mock_build.call_count == 1
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
-    @patch("src.main.get_openai_key")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
+    @patch("src.dependencies.get_openai_key")
     def test_graph_rebuilt_when_api_key_changes(self, mock_get_key, _mock_emb, mock_build, client):
         """build_ask_graph is called again after the API key is rotated."""
         mock_build.return_value.invoke.return_value = _graph_result()
@@ -304,16 +304,16 @@ class TestGraphCaching:
 
 
 class TestQueryStreamEndpoint:
-    @patch("src.main.collection_exists", return_value=False)
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.collection_exists", return_value=False)
+    @patch("src.routers.query.get_embeddings")
     def test_not_ingested_returns_404(self, _mock_emb, _mock_ce, client):
         resp = client.post("/query", json={"video_id": "missing", "question": "q?", "stream": True})
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.routers.query.get_embeddings")
     def test_no_chunks_emits_refusal_done_event(self, _mock_emb, _mock_ce, mock_build, client):
         async def fake_astream_events(state, **kwargs):
             yield {
@@ -342,9 +342,9 @@ class TestQueryStreamEndpoint:
         assert done["citations"] == []
         assert "isn't available" in done["answer"]
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.routers.query.get_embeddings")
     def test_happy_path_emits_token_and_done_events(self, _mock_emb, _mock_ce, mock_build, client):
         from langchain_core.messages import AIMessageChunk
 
@@ -390,9 +390,9 @@ class TestQueryStreamEndpoint:
         assert "answer" in done
         assert "tokens_used" in done
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.routers.query.get_embeddings")
     def test_done_event_citations_match_retrieved_chunks(
         self, _mock_emb, _mock_ce, mock_build, client
     ):
@@ -427,9 +427,9 @@ class TestQueryStreamEndpoint:
         assert len(done["citations"]) == 1
         assert done["citations"][0]["chunk_id"] == "cX"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.collection_exists", return_value=True)
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.routers.query.get_embeddings")
     def test_llm_exception_emits_error_sse_event(self, _mock_emb, _mock_ce, mock_build, client):
         """LLM failure inside the graph stream emits an error SSE event instead of crashing."""
 
@@ -453,8 +453,8 @@ class TestQueryStreamEndpoint:
 
 
 class TestServerSideHistory:
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_history_appended_after_successful_query(self, _mock_emb, mock_build, client):
         """A successful /query stores the turn so the next request sees it."""
         from langchain_core.messages import AIMessage, HumanMessage
@@ -475,8 +475,8 @@ class TestServerSideHistory:
         assert isinstance(second_call_state["history"][1], AIMessage)
         assert second_call_state["history"][1].content == "First answer."
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_server_history_overrides_client_history(self, _mock_emb, mock_build, client):
         """When a thread exists in the store, client-supplied history is ignored."""
         mock_graph = mock_build.return_value
@@ -500,8 +500,8 @@ class TestServerSideHistory:
         assert second_state["history"][0].content == "stored q?"
         assert second_state["history"][1].content == "stored answer"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_client_history_seeds_brand_new_thread(self, _mock_emb, mock_build, client):
         """conversation_history in the request seeds a thread that doesn't exist yet."""
         from langchain_core.messages import HumanMessage
@@ -521,8 +521,8 @@ class TestServerSideHistory:
         assert isinstance(state["history"][0], HumanMessage)
         assert state["history"][0].content == "seeded turn"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_history_not_stored_on_graph_error(self, _mock_emb, mock_build, client):
         """A failed /query (e.g. VIDEO_NOT_INGESTED) does not write to the store."""
         mock_graph = mock_build.return_value
@@ -537,8 +537,8 @@ class TestServerSideHistory:
         second_state = mock_graph.invoke.call_args_list[1][0][0]
         assert second_state["history"] == []
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_history_cap_per_thread(self, _mock_emb, mock_build, client):
         """History is evicted when it exceeds max_history_turns pairs per thread."""
         import chromadb
@@ -552,8 +552,8 @@ class TestServerSideHistory:
         )
 
         with (
-            patch("src.main.build_ask_graph") as mock_b,
-            patch("src.main.get_embeddings"),
+            patch("src.routers.query.build_ask_graph") as mock_b,
+            patch("src.routers.query.get_embeddings"),
         ):
             mock_b.return_value.invoke.return_value = _graph_result(answer="ans")
             # 3 turns; after turn 3 the store should evict turn 1 (cap = 2 pairs)
@@ -579,8 +579,8 @@ class TestServerSideHistory:
 
 
 class TestDeleteThread:
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_delete_existing_thread_returns_204(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result()
         client.post("/query", json={"video_id": "v", "question": "q?", "thread_id": "del-t1"})
@@ -588,8 +588,8 @@ class TestDeleteThread:
         resp = client.delete("/threads/del-t1")
         assert resp.status_code == 204
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_delete_clears_history_for_next_request(self, _mock_emb, mock_build, client):
         """After DELETE, the next /query sees no history for that thread."""
         mock_graph = mock_build.return_value
@@ -610,8 +610,8 @@ class TestDeleteThread:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "THREAD_NOT_FOUND"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_delete_is_idempotent_second_call_returns_404(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_result()
         client.post("/query", json={"video_id": "v", "question": "q?", "thread_id": "del-t3"})

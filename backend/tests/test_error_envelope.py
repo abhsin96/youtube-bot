@@ -58,8 +58,8 @@ def _assert_envelope(body: dict) -> dict:
 
 
 class TestErrorEnvelopeShape:
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_404_video_not_ingested_envelope(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_error(VIDEO_NOT_INGESTED)
         resp = client.post("/query", json={"video_id": "missing", "question": "q?"})
@@ -68,8 +68,8 @@ class TestErrorEnvelopeShape:
         err = _assert_envelope(resp.json())
         assert err["code"] == "VIDEO_NOT_INGESTED"
 
-    @patch("src.main.build_ask_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.build_ask_graph")
+    @patch("src.routers.query.get_embeddings")
     def test_500_internal_error_envelope(self, _mock_emb, mock_build, client):
         mock_build.return_value.invoke.return_value = _graph_error("something went wrong")
         resp = client.post("/query", json={"video_id": "vid1", "question": "q?"})
@@ -79,8 +79,8 @@ class TestErrorEnvelopeShape:
         assert err["code"] == "INTERNAL_ERROR"
         assert "something went wrong" in err["message"]
 
-    @patch("src.main.build_graph")
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.ingest.build_graph")
+    @patch("src.routers.ingest.get_embeddings")
     def test_502_ingest_failed_envelope(self, _mock_emb, mock_bg, client):
         mock_bg.return_value.invoke.return_value = {
             "status": "error",
@@ -102,8 +102,8 @@ class TestErrorEnvelopeShape:
         err = _assert_envelope(resp.json())
         assert err["code"] == "VALIDATION_ERROR"
 
-    @patch("src.main.collection_exists", return_value=False)
-    @patch("src.main.get_embeddings")
+    @patch("src.routers.query.collection_exists", return_value=False)
+    @patch("src.routers.query.get_embeddings")
     def test_stream_404_envelope(self, _mock_emb, _mock_ce, client):
         resp = client.post("/query", json={"video_id": "missing", "question": "q?", "stream": True})
 

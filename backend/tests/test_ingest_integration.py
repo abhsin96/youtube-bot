@@ -57,7 +57,7 @@ def client():
 
 # Patch targets — external I/O only; graph wiring is exercised for real
 _GRAPH = "graphs.ingest_graph"
-_MAIN = "src.main"
+_MAIN = "src.routers.ingest"
 
 
 # ---------------------------------------------------------------------------
