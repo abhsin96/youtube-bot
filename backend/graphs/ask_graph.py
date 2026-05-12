@@ -14,7 +14,6 @@ into the running AskState by LangGraph.
 
 from __future__ import annotations
 
-import chromadb
 import structlog
 from langchain_core.documents import Document
 from langchain_core.messages import ToolMessage
@@ -25,8 +24,7 @@ from typing_extensions import TypedDict
 
 from src.chain import _CHAT_PROMPT, _format_context, _load_system_prompt, _trim_to_budget
 from src.metadata_service import fetch_video_metadata
-from src.retriever import build_retriever
-from src.vector_store import collection_exists, get_channel_metadata
+from src.stores.vector_store_abc import VectorStorePort
 from src.web_search import search as web_search
 
 logger = structlog.get_logger(__name__)
@@ -113,10 +111,10 @@ def build_ask_graph(
     embeddings,
     *,
     api_key: str | None = None,
-    chroma_client: chromadb.ClientAPI | None = None,
+    vector_store: VectorStorePort | None = None,
 ):
     """
-    Compile the ask LangGraph, closing over *settings*, *embeddings*, and *chroma_client*.
+    Compile the ask LangGraph, closing over *settings*, *embeddings*, and *vector_store*.
 
     The LLM is bound with a web-search tool so it can autonomously look up
     creator/channel information when the transcript context is insufficient.
@@ -141,17 +139,16 @@ def build_ask_graph(
     # ── Nodes ────────────────────────────────────────────────────────────────
 
     def validate_node(state: AskState) -> dict:
-        if not collection_exists(state["video_id"], chroma_client):
+        if not vector_store or not vector_store.collection_exists(state["video_id"]):
             logger.info("collection not found", video_id=state["video_id"])
             return {"error": VIDEO_NOT_INGESTED}
         return {"error": None}
 
     def retrieve_node(state: AskState) -> dict:
         try:
-            retriever = build_retriever(
+            retriever = vector_store.build_retriever(
                 state["video_id"],
                 embeddings,
-                chroma_client,
                 k=state.get("k", 5),
                 score_threshold=score_threshold,
             )
@@ -189,7 +186,7 @@ def build_ask_graph(
 
             # Prepend the channel name so the LLM can build a good search query
             # when it decides to call the web search tool.
-            channel_name = _resolve_channel_name(state["video_id"], chroma_client)
+            channel_name = _resolve_channel_name(state["video_id"], vector_store)
             if channel_name:
                 prefix = f"[Video Channel: {channel_name}]\n\n"
                 context = prefix + context if context else prefix.strip()
@@ -301,9 +298,9 @@ def build_ask_graph(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_channel_name(video_id: str, chroma_client) -> str:
+def _resolve_channel_name(video_id: str, vector_store: VectorStorePort | None) -> str:
     """Return channel name from stored metadata, falling back to oEmbed API."""
-    meta = get_channel_metadata(video_id, chroma_client)
+    meta = vector_store.get_channel_metadata(video_id) if vector_store else {}
     name = meta.get("channel_name", "")
     if not name:
         name = fetch_video_metadata(video_id).get("channel_name", "")

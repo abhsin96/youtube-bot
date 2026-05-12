@@ -102,7 +102,7 @@ class TestErrorEnvelopeShape:
         err = _assert_envelope(resp.json())
         assert err["code"] == "VALIDATION_ERROR"
 
-    @patch("src.routers.query.collection_exists", return_value=False)
+    @patch("src.vector_store.collection_exists", return_value=False)
     @patch("src.routers.query.get_embeddings")
     def test_stream_404_envelope(self, _mock_emb, _mock_ce, client):
         resp = client.post("/query", json={"video_id": "missing", "question": "q?", "stream": True})

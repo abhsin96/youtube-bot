@@ -25,6 +25,7 @@ from src.dependencies import _resolve_key, get_chroma_client, get_settings, limi
 from src.embeddings import get_embeddings
 from src.error_envelope import AppError
 from src.schemas import IngestRequest, IngestResponse
+from src.stores.chroma_vector_store import ChromaVectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -150,7 +151,7 @@ async def ingest(
         "video_id": body.video_id,
         "force": body.force,
         "embeddings": embeddings,
-        "chroma_client": chroma_client,
+        "vector_store": ChromaVectorStore(chroma_client),
         "segments": [],
         "chunks": [],
         "embedded_chunks": [],

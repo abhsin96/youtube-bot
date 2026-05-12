@@ -304,7 +304,7 @@ class TestGraphCaching:
 
 
 class TestQueryStreamEndpoint:
-    @patch("src.routers.query.collection_exists", return_value=False)
+    @patch("src.vector_store.collection_exists", return_value=False)
     @patch("src.routers.query.get_embeddings")
     def test_not_ingested_returns_404(self, _mock_emb, _mock_ce, client):
         resp = client.post("/query", json={"video_id": "missing", "question": "q?", "stream": True})
@@ -312,7 +312,7 @@ class TestQueryStreamEndpoint:
         assert resp.json()["error"]["code"] == "VIDEO_NOT_INGESTED"
 
     @patch("src.routers.query.build_ask_graph")
-    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.vector_store.collection_exists", return_value=True)
     @patch("src.routers.query.get_embeddings")
     def test_no_chunks_emits_refusal_done_event(self, _mock_emb, _mock_ce, mock_build, client):
         async def fake_astream_events(state, **kwargs):
@@ -343,7 +343,7 @@ class TestQueryStreamEndpoint:
         assert "isn't available" in done["answer"]
 
     @patch("src.routers.query.build_ask_graph")
-    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.vector_store.collection_exists", return_value=True)
     @patch("src.routers.query.get_embeddings")
     def test_happy_path_emits_token_and_done_events(self, _mock_emb, _mock_ce, mock_build, client):
         from langchain_core.messages import AIMessageChunk
@@ -391,7 +391,7 @@ class TestQueryStreamEndpoint:
         assert "tokens_used" in done
 
     @patch("src.routers.query.build_ask_graph")
-    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.vector_store.collection_exists", return_value=True)
     @patch("src.routers.query.get_embeddings")
     def test_done_event_citations_match_retrieved_chunks(
         self, _mock_emb, _mock_ce, mock_build, client
@@ -428,7 +428,7 @@ class TestQueryStreamEndpoint:
         assert done["citations"][0]["chunk_id"] == "cX"
 
     @patch("src.routers.query.build_ask_graph")
-    @patch("src.routers.query.collection_exists", return_value=True)
+    @patch("src.vector_store.collection_exists", return_value=True)
     @patch("src.routers.query.get_embeddings")
     def test_llm_exception_emits_error_sse_event(self, _mock_emb, _mock_ce, mock_build, client):
         """LLM failure inside the graph stream emits an error SSE event instead of crashing."""

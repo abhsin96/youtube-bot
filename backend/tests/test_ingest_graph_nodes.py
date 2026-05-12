@@ -39,12 +39,29 @@ def _fake_embeddings(dim: int = 4):
     return emb
 
 
+def _make_vs(**method_overrides) -> MagicMock:
+    """Return a MagicMock pre-configured as a VectorStorePort."""
+    vs = MagicMock()
+    vs.collection_exists.return_value = False
+    vs.add_documents.return_value = None
+    vs.delete_collection.return_value = None
+    vs.save_channel_metadata.return_value = None
+    vs.get_channel_metadata.return_value = {}
+    for attr, val in method_overrides.items():
+        mock_method = getattr(vs, attr)
+        if isinstance(val, Exception):
+            mock_method.side_effect = val
+        else:
+            mock_method.return_value = val
+    return vs
+
+
 def _state(**overrides) -> IngestState:
     base: IngestState = {
         "video_id": "vid1",
         "force": False,
         "embeddings": _fake_embeddings(),
-        "chroma_client": MagicMock(),
+        "vector_store": _make_vs(),
         "segments": [],
         "chunks": [],
         "embedded_chunks": [],
@@ -61,26 +78,26 @@ def _state(**overrides) -> IngestState:
 
 
 def test_idempotency_skips_when_exists():
-    with patch("graphs.ingest_graph.collection_exists", return_value=True):
-        result = idempotency_check_node(_state(force=False))
+    vs = _make_vs(collection_exists=True)
+    result = idempotency_check_node(_state(force=False, vector_store=vs))
     assert result["status"] == "skipped"
 
 
 def test_idempotency_runs_when_not_exists():
-    with patch("graphs.ingest_graph.collection_exists", return_value=False):
-        result = idempotency_check_node(_state(force=False))
+    vs = _make_vs(collection_exists=False)
+    result = idempotency_check_node(_state(force=False, vector_store=vs))
     assert result["status"] == "running"
 
 
 def test_idempotency_force_runs_even_when_exists():
-    with patch("graphs.ingest_graph.collection_exists", return_value=True):
-        result = idempotency_check_node(_state(force=True))
+    vs = _make_vs(collection_exists=True)
+    result = idempotency_check_node(_state(force=True, vector_store=vs))
     assert result["status"] == "running"
 
 
 def test_idempotency_error_on_storage_failure():
-    with patch("graphs.ingest_graph.collection_exists", side_effect=OSError("disk full")):
-        result = idempotency_check_node(_state())
+    vs = _make_vs(collection_exists=OSError("disk full"))
+    result = idempotency_check_node(_state(vector_store=vs))
     assert result["status"] == "error"
     assert "disk full" in result["error"]
 
@@ -169,36 +186,32 @@ def test_embed_node_does_not_set_status_on_success():
 
 
 def test_store_node_sets_status_done():
-    with patch("graphs.ingest_graph.add_documents"):
-        result = store_node(_state(chunks=_CHUNKS))
+    vs = _make_vs()
+    result = store_node(_state(chunks=_CHUNKS, vector_store=vs))
     assert result["status"] == "done"
     assert result["error"] is None
 
 
 def test_store_node_uses_precomputed_vectors():
     pairs = [(_CHUNKS[0], [0.1, 0.2, 0.3, 0.4])]
-    with patch("graphs.ingest_graph.add_documents") as mock_add:
-        emb = _fake_embeddings()
-        client = MagicMock()
-        store_node(
-            _state(chunks=_CHUNKS, embedded_chunks=pairs, embeddings=emb, chroma_client=client)
-        )
-    mock_add.assert_called_once_with(
-        "vid1", [_CHUNKS[0]], emb, client, precomputed_vectors=[[0.1, 0.2, 0.3, 0.4]]
+    vs = _make_vs()
+    emb = _fake_embeddings()
+    store_node(_state(chunks=_CHUNKS, embedded_chunks=pairs, embeddings=emb, vector_store=vs))
+    vs.add_documents.assert_called_once_with(
+        "vid1", [_CHUNKS[0]], emb, precomputed_vectors=[[0.1, 0.2, 0.3, 0.4]]
     )
 
 
 def test_store_node_falls_back_when_no_embedded_chunks():
-    with patch("graphs.ingest_graph.add_documents") as mock_add:
-        emb = _fake_embeddings()
-        client = MagicMock()
-        store_node(_state(chunks=_CHUNKS, embedded_chunks=[], embeddings=emb, chroma_client=client))
-    mock_add.assert_called_once_with("vid1", _CHUNKS, emb, client)
+    vs = _make_vs()
+    emb = _fake_embeddings()
+    store_node(_state(chunks=_CHUNKS, embedded_chunks=[], embeddings=emb, vector_store=vs))
+    vs.add_documents.assert_called_once_with("vid1", _CHUNKS, emb)
 
 
 def test_store_node_error_on_failure():
-    with patch("graphs.ingest_graph.add_documents", side_effect=RuntimeError("chroma down")):
-        result = store_node(_state(chunks=_CHUNKS))
+    vs = _make_vs(add_documents=RuntimeError("chroma down"))
+    result = store_node(_state(chunks=_CHUNKS, vector_store=vs))
     assert result["status"] == "error"
     assert "chroma down" in result["error"]
 
@@ -245,15 +258,14 @@ def test_route_on_error_returns_ok_on_pending():
 
 
 def test_graph_happy_path():
+    vs = _make_vs(collection_exists=False)
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
-        patch("graphs.ingest_graph.add_documents"),
     ):
-        result = build_graph().invoke(_state())
+        result = build_graph().invoke(_state(vector_store=vs))
 
     assert result["status"] == "done"
     assert result["error"] is None
@@ -262,33 +274,30 @@ def test_graph_happy_path():
 
 
 def test_graph_skips_when_collection_exists():
-    with patch("graphs.ingest_graph.collection_exists", return_value=True):
-        result = build_graph().invoke(_state(force=False))
+    vs = _make_vs(collection_exists=True)
+    result = build_graph().invoke(_state(force=False, vector_store=vs))
 
     assert result["status"] == "skipped"
     assert result["segments"] == []  # never populated
 
 
 def test_graph_force_bypasses_idempotency():
+    vs = _make_vs(collection_exists=True)
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=True),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
-        patch("graphs.ingest_graph.add_documents"),
     ):
-        result = build_graph().invoke(_state(force=True))
+        result = build_graph().invoke(_state(force=True, vector_store=vs))
 
     assert result["status"] == "done"
 
 
 def test_graph_stops_at_fetch_error():
-    with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
-        patch("graphs.ingest_graph.fetch_transcript", side_effect=RuntimeError("no captions")),
-    ):
-        result = build_graph().invoke(_state())
+    vs = _make_vs(collection_exists=False)
+    with patch("graphs.ingest_graph.fetch_transcript", side_effect=RuntimeError("no captions")):
+        result = build_graph().invoke(_state(vector_store=vs))
 
     assert result["status"] == "error"
     assert "no captions" in result["error"]
@@ -296,15 +305,14 @@ def test_graph_stops_at_fetch_error():
 
 
 def test_graph_stops_at_embed_error():
+    vs = _make_vs(collection_exists=False)
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("rate limit")),
-        patch("graphs.ingest_graph.delete_collection"),
     ):
-        result = build_graph().invoke(_state())
+        result = build_graph().invoke(_state(vector_store=vs))
 
     assert result["status"] == "error"
     assert result["embedded_chunks"] == []  # store_node never ran
@@ -316,30 +324,29 @@ def test_graph_stops_at_embed_error():
 
 
 def test_rollback_calls_delete_collection():
-    client = MagicMock()
-    with patch("graphs.ingest_graph.delete_collection") as mock_del:
-        rollback_node(_state(video_id="vid1", chroma_client=client, status="error"))
-    mock_del.assert_called_once_with("vid1", client)
+    vs = _make_vs()
+    rollback_node(_state(video_id="vid1", vector_store=vs, status="error"))
+    vs.delete_collection.assert_called_once_with("vid1")
 
 
 def test_rollback_returns_empty_dict():
-    with patch("graphs.ingest_graph.delete_collection"):
-        result = rollback_node(_state(status="error", error="something failed"))
+    vs = _make_vs()
+    result = rollback_node(_state(status="error", error="something failed", vector_store=vs))
     assert result == {}
 
 
 def test_rollback_preserves_error_in_state():
     # rollback returns {}, so LangGraph keeps the existing status/error untouched
-    with patch("graphs.ingest_graph.delete_collection"):
-        delta = rollback_node(_state(status="error", error="original error"))
+    vs = _make_vs()
+    delta = rollback_node(_state(status="error", error="original error", vector_store=vs))
     assert "status" not in delta
     assert "error" not in delta
 
 
 def test_rollback_tolerates_delete_failure():
-    with patch("graphs.ingest_graph.delete_collection", side_effect=RuntimeError("disk full")):
-        # must not raise — original error should remain surfaceable
-        result = rollback_node(_state(status="error"))
+    vs = _make_vs(delete_collection=RuntimeError("disk full"))
+    # must not raise — original error should remain surfaceable
+    result = rollback_node(_state(status="error", vector_store=vs))
     assert result == {}
 
 
@@ -349,79 +356,71 @@ def test_rollback_tolerates_delete_failure():
 
 
 def test_rollback_called_on_embed_failure():
-    client = MagicMock()
+    vs = _make_vs(collection_exists=False)
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("rate limit")),
-        patch("graphs.ingest_graph.delete_collection") as mock_del,
     ):
-        result = build_graph().invoke(_state(chroma_client=client))
+        result = build_graph().invoke(_state(vector_store=vs))
 
     assert result["status"] == "error"
-    mock_del.assert_called_once_with("vid1", client)
+    vs.delete_collection.assert_called_once_with("vid1")
 
 
 def test_rollback_called_on_store_failure():
-    client = MagicMock()
+    vs = _make_vs(collection_exists=False, add_documents=RuntimeError("chroma down"))
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
-        patch("graphs.ingest_graph.add_documents", side_effect=RuntimeError("chroma down")),
-        patch("graphs.ingest_graph.delete_collection") as mock_del,
     ):
-        result = build_graph().invoke(_state(chroma_client=client))
+        result = build_graph().invoke(_state(vector_store=vs))
 
     assert result["status"] == "error"
-    mock_del.assert_called_once_with("vid1", client)
+    vs.delete_collection.assert_called_once_with("vid1")
 
 
 def test_rollback_not_called_on_success():
+    vs = _make_vs(collection_exists=False)
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
-        patch("graphs.ingest_graph.add_documents"),
-        patch("graphs.ingest_graph.delete_collection") as mock_del,
     ):
-        result = build_graph().invoke(_state())
+        result = build_graph().invoke(_state(vector_store=vs))
 
     assert result["status"] == "done"
-    mock_del.assert_not_called()
+    vs.delete_collection.assert_not_called()
 
 
 def test_retry_succeeds_after_rollback():
     """After a failed run (collection deleted), a second run completes."""
-    client = MagicMock()
-    base = _state(chroma_client=client)
+    vs = _make_vs(collection_exists=False)
 
     # First run: embed fails → rollback deletes collection
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", side_effect=RuntimeError("transient")),
-        patch("graphs.ingest_graph.delete_collection"),
     ):
-        first = build_graph().invoke(base)
+        first = build_graph().invoke(_state(vector_store=vs))
     assert first["status"] == "error"
+
+    # Reset the mock for the second run
+    vs.collection_exists.side_effect = None
+    vs.collection_exists.return_value = False
 
     # Second run: everything succeeds
     with (
-        patch("graphs.ingest_graph.collection_exists", return_value=False),
         patch("graphs.ingest_graph.fetch_transcript", return_value=_SEGMENTS),
         patch("graphs.ingest_graph.segments_to_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph._chunk_documents", return_value=_CHUNKS),
         patch("graphs.ingest_graph.embed_chunks", return_value=[(_CHUNKS[0], [0.0] * 4)]),
-        patch("graphs.ingest_graph.add_documents"),
     ):
-        second = build_graph().invoke(base)
+        second = build_graph().invoke(_state(vector_store=vs))
     assert second["status"] == "done"

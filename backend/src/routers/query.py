@@ -30,8 +30,8 @@ from src.dependencies import (
 from src.embeddings import get_embeddings
 from src.error_envelope import AppError
 from src.schemas import AskResponse, QueryRequest, QuestionResponse
+from src.stores.chroma_vector_store import ChromaVectorStore
 from src.stores.thread_store import AnyThreadStore, _resolve_history
-from src.vector_store import collection_exists
 
 logger = structlog.get_logger(__name__)
 
@@ -137,7 +137,9 @@ def _get_or_rebuild_ask_graph(
             "building ask graph",
             reason="api_key_changed" if cache["key_hash"] else "first_build",
         )
-        cache["graph"] = build_ask_graph(settings, emb, api_key=key, chroma_client=chroma_client)
+        cache["graph"] = build_ask_graph(
+            settings, emb, api_key=key, vector_store=ChromaVectorStore(chroma_client)
+        )
         cache["key_hash"] = key_hash
     return cache["graph"]
 
@@ -240,7 +242,8 @@ async def _handle_streaming_query(
     chroma_client,
     ask_graph_cache: dict,
 ) -> StreamingResponse:
-    if not collection_exists(body.video_id, chroma_client):
+    vector_store = ChromaVectorStore(chroma_client)
+    if not vector_store.collection_exists(body.video_id):
         raise AppError(404, "VIDEO_NOT_INGESTED", "Video has not been ingested yet")
 
     graph = _get_or_rebuild_ask_graph(

@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Literal, TypedDict
 
 import structlog
 from langchain_core.documents import Document
@@ -56,13 +56,8 @@ from src.chunker import chunk_documents as _chunk_documents  # noqa: E402
 from src.document_converter import segments_to_documents  # noqa: E402
 from src.embeddings import embed_chunks  # noqa: E402
 from src.metadata_service import fetch_video_metadata  # noqa: E402
+from src.stores.vector_store_abc import VectorStorePort  # noqa: E402
 from src.transcript_service import TranscriptSegment, fetch_transcript  # noqa: E402
-from src.vector_store import (  # noqa: E402
-    add_documents,
-    collection_exists,
-    delete_collection,
-    save_channel_metadata,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -95,8 +90,8 @@ class IngestState(TypedDict):
     embeddings: Embeddings
     """Embedding model instance; passed through without modification."""
 
-    chroma_client: Any
-    """chromadb.ClientAPI instance for the Chroma server."""
+    vector_store: VectorStorePort
+    """VectorStorePort implementation (e.g. ChromaVectorStore)."""
 
     # ── pipeline outputs (written by exactly one node each) ───────────────
     segments: list[TranscriptSegment]
@@ -148,7 +143,7 @@ def idempotency_check_node(state: IngestState) -> dict:
         status="running"  — needs ingestion (collection absent OR force=True)
     """
     try:
-        exists = collection_exists(state["video_id"], state["chroma_client"])
+        exists = state["vector_store"].collection_exists(state["video_id"])
     except Exception as exc:  # storage unavailable
         logger.error("idempotency check failed", video_id=state["video_id"], error=str(exc))
         return _error(f"idempotency check failed: {exc}")
@@ -237,19 +232,17 @@ def store_node(state: IngestState) -> dict:
         if embedded:
             docs_list = [doc for doc, _ in embedded]
             vectors = [vec for _, vec in embedded]
-            add_documents(
+            state["vector_store"].add_documents(
                 state["video_id"],
                 docs_list,
                 state["embeddings"],
-                state["chroma_client"],
                 precomputed_vectors=vectors,
             )
         else:
-            add_documents(
+            state["vector_store"].add_documents(
                 state["video_id"],
                 state["chunks"],
                 state["embeddings"],
-                state["chroma_client"],
             )
     except Exception as exc:
         logger.error("store failed", video_id=state["video_id"], error=str(exc))
@@ -259,7 +252,7 @@ def store_node(state: IngestState) -> dict:
     channel_meta = state.get("channel_metadata") or {}
     if channel_meta:
         try:
-            save_channel_metadata(state["video_id"], state["chroma_client"], channel_meta)
+            state["vector_store"].save_channel_metadata(state["video_id"], channel_meta)
         except Exception as exc:
             logger.warning("channel_metadata_save_failed", video_id=state["video_id"], error=str(exc))
 
@@ -281,7 +274,7 @@ def rollback_node(state: IngestState) -> dict:
     Does NOT overwrite status/error; the originating node already set them.
     """
     try:
-        delete_collection(state["video_id"], state["chroma_client"])
+        state["vector_store"].delete_collection(state["video_id"])
         logger.info("rollback complete", video_id=state["video_id"])
     except Exception as exc:
         # Log but do not mask the original error that triggered rollback.

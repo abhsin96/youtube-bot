@@ -3,11 +3,12 @@ Integration tests for POST /ingest.
 
 These tests let the full LangGraph pipeline run; only the external I/O
 boundaries are mocked:
-  - graphs.ingest_graph.collection_exists / add_documents / delete_collection
+  - src.vector_store.collection_exists / add_documents / delete_collection
+    (ChromaVectorStore delegates to these, so patching here intercepts all calls)
   - graphs.ingest_graph.fetch_transcript
   - graphs.ingest_graph.segments_to_documents / _chunk_documents
   - graphs.ingest_graph.embed_chunks
-  - src.main.get_embeddings   ← prevents real OpenAI client construction
+  - src.routers.ingest.get_embeddings   ← prevents real OpenAI client construction
 """
 
 from unittest.mock import MagicMock, patch
@@ -56,7 +57,8 @@ def client():
 
 
 # Patch targets — external I/O only; graph wiring is exercised for real
-_GRAPH = "graphs.ingest_graph"
+_GRAPH = "graphs.ingest_graph"  # fetch_transcript, segments_to_documents, embed_chunks, etc.
+_VS = "src.vector_store"  # collection_exists, add_documents, delete_collection
 _MAIN = "src.routers.ingest"
 
 
@@ -67,12 +69,12 @@ _MAIN = "src.routers.ingest"
 
 def test_happy_path_returns_done(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents"),
+        patch(f"{_VS}.add_documents"),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
@@ -85,12 +87,12 @@ def test_happy_path_returns_done(client):
 
 def test_happy_path_chunk_count_matches_graph_output(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents"),
+        patch(f"{_VS}.add_documents"),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
@@ -100,12 +102,12 @@ def test_happy_path_chunk_count_matches_graph_output(client):
 
 def test_happy_path_add_documents_called_once(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents") as mock_add,
+        patch(f"{_VS}.add_documents") as mock_add,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -115,13 +117,13 @@ def test_happy_path_add_documents_called_once(client):
 
 def test_happy_path_delete_collection_not_called(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents"),
-        patch(f"{_GRAPH}.delete_collection") as mock_del,
+        patch(f"{_VS}.add_documents"),
+        patch(f"{_VS}.delete_collection") as mock_del,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -136,7 +138,7 @@ def test_happy_path_delete_collection_not_called(client):
 
 def test_cached_returns_200_with_cached_true(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=True),
+        patch(f"{_VS}.collection_exists", return_value=True),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
@@ -150,7 +152,7 @@ def test_cached_returns_200_with_cached_true(client):
 
 def test_cached_fetch_transcript_never_called(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=True),
+        patch(f"{_VS}.collection_exists", return_value=True),
         patch(f"{_GRAPH}.fetch_transcript") as mock_fetch,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
@@ -161,8 +163,8 @@ def test_cached_fetch_transcript_never_called(client):
 
 def test_cached_add_documents_never_called(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=True),
-        patch(f"{_GRAPH}.add_documents") as mock_add,
+        patch(f"{_VS}.collection_exists", return_value=True),
+        patch(f"{_VS}.add_documents") as mock_add,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -177,12 +179,12 @@ def test_cached_add_documents_never_called(client):
 
 def test_force_reruns_when_collection_exists(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=True),
+        patch(f"{_VS}.collection_exists", return_value=True),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents"),
+        patch(f"{_VS}.add_documents"),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1", "force": True})
@@ -199,9 +201,9 @@ def test_force_reruns_when_collection_exists(client):
 
 def test_transcript_failure_returns_502(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", side_effect=RuntimeError("no captions")),
-        patch(f"{_GRAPH}.delete_collection"),
+        patch(f"{_VS}.delete_collection"),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
@@ -212,9 +214,9 @@ def test_transcript_failure_returns_502(client):
 
 def test_transcript_failure_triggers_rollback(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", side_effect=RuntimeError("no captions")),
-        patch(f"{_GRAPH}.delete_collection") as mock_del,
+        patch(f"{_VS}.delete_collection") as mock_del,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -224,10 +226,10 @@ def test_transcript_failure_triggers_rollback(client):
 
 def test_transcript_failure_add_documents_never_called(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", side_effect=RuntimeError("no captions")),
-        patch(f"{_GRAPH}.delete_collection"),
-        patch(f"{_GRAPH}.add_documents") as mock_add,
+        patch(f"{_VS}.delete_collection"),
+        patch(f"{_VS}.add_documents") as mock_add,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -242,12 +244,12 @@ def test_transcript_failure_add_documents_never_called(client):
 
 def test_embed_failure_returns_502(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", side_effect=RuntimeError("rate limit")),
-        patch(f"{_GRAPH}.delete_collection"),
+        patch(f"{_VS}.delete_collection"),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
@@ -258,12 +260,12 @@ def test_embed_failure_returns_502(client):
 
 def test_embed_failure_triggers_rollback(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", side_effect=RuntimeError("rate limit")),
-        patch(f"{_GRAPH}.delete_collection") as mock_del,
+        patch(f"{_VS}.delete_collection") as mock_del,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -273,13 +275,13 @@ def test_embed_failure_triggers_rollback(client):
 
 def test_embed_failure_add_documents_never_called(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", side_effect=RuntimeError("rate limit")),
-        patch(f"{_GRAPH}.delete_collection"),
-        patch(f"{_GRAPH}.add_documents") as mock_add,
+        patch(f"{_VS}.delete_collection"),
+        patch(f"{_VS}.add_documents") as mock_add,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -294,13 +296,13 @@ def test_embed_failure_add_documents_never_called(client):
 
 def test_store_failure_returns_502(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents", side_effect=RuntimeError("chroma down")),
-        patch(f"{_GRAPH}.delete_collection"),
+        patch(f"{_VS}.add_documents", side_effect=RuntimeError("chroma down")),
+        patch(f"{_VS}.delete_collection"),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
@@ -311,13 +313,13 @@ def test_store_failure_returns_502(client):
 
 def test_store_failure_triggers_rollback(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", return_value=_SEGMENTS),
         patch(f"{_GRAPH}.segments_to_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}._chunk_documents", return_value=_CHUNKS),
         patch(f"{_GRAPH}.embed_chunks", return_value=_EMBEDDED),
-        patch(f"{_GRAPH}.add_documents", side_effect=RuntimeError("chroma down")),
-        patch(f"{_GRAPH}.delete_collection") as mock_del,
+        patch(f"{_VS}.add_documents", side_effect=RuntimeError("chroma down")),
+        patch(f"{_VS}.delete_collection") as mock_del,
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         client.post("/ingest", json={"video_id": "vid1"})
@@ -332,9 +334,9 @@ def test_store_failure_triggers_rollback(client):
 
 def test_rollback_failure_does_not_mask_original_error(client):
     with (
-        patch(f"{_GRAPH}.collection_exists", return_value=False),
+        patch(f"{_VS}.collection_exists", return_value=False),
         patch(f"{_GRAPH}.fetch_transcript", side_effect=RuntimeError("no captions")),
-        patch(f"{_GRAPH}.delete_collection", side_effect=OSError("disk full")),
+        patch(f"{_VS}.delete_collection", side_effect=OSError("disk full")),
         patch(f"{_MAIN}.get_embeddings", return_value=_fake_embeddings()),
     ):
         resp = client.post("/ingest", json={"video_id": "vid1"})
