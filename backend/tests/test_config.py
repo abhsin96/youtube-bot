@@ -75,6 +75,53 @@ def test_max_history_turns_below_one():
         make(max_history_turns=0)
 
 
+# --- redis_url default ---
+
+
+def test_redis_url_defaults_to_empty():
+    """Empty default means in-memory ThreadStore out of the box."""
+    s = make()
+    assert s.redis_url == ""
+
+
+# --- log_level validator ---
+
+
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+def test_valid_log_levels(level):
+    s = make(log_level=level)
+    assert s.log_level == level
+
+
+def test_log_level_is_normalised_to_uppercase():
+    s = make(log_level="debug")
+    assert s.log_level == "DEBUG"
+
+
+def test_invalid_log_level_raises():
+    with pytest.raises(ValidationError, match="LOG_LEVEL"):
+        make(log_level="VERBOSE")
+
+
+# --- LangSmith misconfiguration warning ---
+
+
+def test_langsmith_tracing_without_key_logs_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        make(langsmith_tracing="true", langsmith_api_key="")
+    assert "langsmith_tracing_enabled_without_key" in caplog.text
+
+
+def test_langsmith_tracing_with_key_no_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        make(langsmith_tracing="true", langsmith_api_key="ls-abc123")
+    assert "langsmith_tracing_enabled_without_key" not in caplog.text
+
+
 # --- load_settings ---
 
 

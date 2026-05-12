@@ -1,7 +1,7 @@
 import sys
 
 import structlog
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = structlog.get_logger(__name__)
@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     max_history_turns: int = 10
     context_budget_tokens: int = 6000
 
-    # --- Redis (empty string disables Redis and uses the in-memory thread store) ---
-    redis_url: str = "redis://localhost:6379"
+    # --- Redis (empty string = use the in-memory thread store) ---
+    redis_url: str = ""
 
     # --- server ---
     version: str = "0.1.0"
@@ -66,6 +66,25 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError("MAX_HISTORY_TURNS must be >= 1")
         return v
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        upper = v.upper()
+        if upper not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(
+                f"LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL — got {v!r}"
+            )
+        return upper
+
+    @model_validator(mode="after")
+    def warn_langsmith_misconfigured(self) -> "Settings":
+        if self.langsmith_tracing.lower() == "true" and not self.langsmith_api_key:
+            logger.warning(
+                "langsmith_tracing_enabled_without_key",
+                hint="Set LANGSMITH_API_KEY to enable tracing.",
+            )
+        return self
 
 
 def load_settings() -> Settings:
