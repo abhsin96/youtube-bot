@@ -1,16 +1,11 @@
 import functools
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
 from langchain_core.documents import Document
-from langchain_core.embeddings import Embeddings
 from langchain_core.messages import BaseMessage
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI
 
-from src.stores.vector_store_abc import VectorStorePort
 from src.tokens import count_tokens
 
 logger = structlog.get_logger(__name__)
@@ -37,12 +32,6 @@ def _seconds_to_mmss(seconds: float) -> str:
     """Convert a float seconds value to [mm:ss] notation."""
     total = int(seconds)
     return f"[{total // 60:02d}:{total % 60:02d}]"
-
-
-@dataclass
-class RAGResult:
-    answer: str
-    sources: list[Document] = field(default_factory=list)
 
 
 def _format_context(docs: list[Document]) -> str:
@@ -122,70 +111,3 @@ def build_chat_prompt() -> ChatPromptTemplate:
 
 
 _CHAT_PROMPT = build_chat_prompt()
-
-
-def build_rag_chain(chat_model: str, openai_api_key: str, openai_api_base: str = ""):
-    """Return an LCEL chain: {context, question, history} → answer str."""
-    kwargs: dict = {
-        "model": chat_model,
-        "openai_api_key": openai_api_key,
-        "temperature": 0.2,
-        "streaming": True,
-    }
-    if openai_api_base:
-        kwargs["base_url"] = openai_api_base
-    llm = ChatOpenAI(**kwargs)
-    return _CHAT_PROMPT | llm | StrOutputParser()
-
-
-def answer_question(
-    video_id: str,
-    question: str,
-    embeddings: Embeddings,
-    vector_store: VectorStorePort,
-    chat_model: str,
-    openai_api_key: str,
-    k: int = 5,
-    score_threshold: float = 0.0,
-    history: list[BaseMessage] | None = None,
-    context_budget_tokens: int = 6000,
-    openai_api_base: str = "",
-) -> RAGResult:
-    """Retrieve relevant chunks then call the LLM; return answer + sources."""
-    retriever = vector_store.build_retriever(
-        video_id, embeddings, k=k, score_threshold=score_threshold
-    )
-    sources = retriever.invoke(question)
-
-    if not sources:
-        logger.info("no sources found", video_id=video_id, question=question)
-        return RAGResult(
-            answer="I'm sorry, that information isn't available in the video transcript.",
-            sources=[],
-        )
-
-    resolved_history = history or []
-    system = _load_system_prompt()
-    sources = _trim_to_budget(
-        sources, system, resolved_history, question, chat_model, context_budget_tokens
-    )
-
-    if not sources:
-        logger.info("all chunks trimmed by budget", video_id=video_id)
-        return RAGResult(
-            answer="I'm sorry, that information isn't available in the video transcript.",
-            sources=[],
-        )
-
-    context = _format_context(sources)
-    chain = build_rag_chain(chat_model, openai_api_key, openai_api_base)
-    answer = chain.invoke(
-        {
-            "context": context,
-            "question": question,
-            "history": resolved_history,
-        }
-    )
-
-    logger.info("question answered", video_id=video_id, sources=len(sources))
-    return RAGResult(answer=answer, sources=sources)

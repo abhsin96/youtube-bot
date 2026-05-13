@@ -17,7 +17,6 @@ from graphs.ask_graph import (
     build_ask_graph,
     make_initial_state,
 )
-from src.chain import answer_question
 from src.config import Settings
 from src.dependencies import (
     _resolve_key,
@@ -29,10 +28,9 @@ from src.dependencies import (
 )
 from src.embeddings import get_embeddings
 from src.error_envelope import AppError
-from src.schemas import AskResponse, QueryRequest, QuestionResponse
+from src.schemas import AskResponse, QueryRequest
 from src.stores.chroma_vector_store import ChromaVectorStore
 from src.stores.thread_store import AnyThreadStore, _resolve_history
-from src.stores.vector_store_abc import VectorStorePort
 
 logger = structlog.get_logger(__name__)
 
@@ -46,12 +44,6 @@ def _run_ask_graph(graph, state: AskState, *, video_id: str, thread_id: str | No
     if thread_id:
         config["metadata"] = {"thread_id": thread_id}
     return graph.invoke(state, config=config)
-
-
-@traceable(name="answer_question", metadata={"operation": "chat"})
-def _run_answer_question(*args, **kwargs):
-    """Bridge for running answer_question in a threadpool with tracing."""
-    return answer_question(*args, **kwargs)
 
 
 async def _stream_graph_answer(
@@ -143,46 +135,6 @@ def _get_or_rebuild_ask_graph(
         )
         cache["key_hash"] = key_hash
     return cache["graph"]
-
-
-async def _handle_simple_query(
-    body: QueryRequest,
-    settings: Settings,
-    key: str,
-    emb,
-    thread_id: str,
-    vector_store: VectorStorePort,
-) -> QuestionResponse:
-    try:
-        result = await run_in_threadpool(
-            _run_answer_question,
-            video_id=body.video_id,
-            question=body.question,
-            embeddings=emb,
-            vector_store=vector_store,
-            chat_model=settings.chat_model,
-            openai_api_key=key,
-            k=body.k,
-            score_threshold=settings.min_similarity_threshold,
-            context_budget_tokens=settings.context_budget_tokens,
-            openai_api_base=settings.openai_api_base,
-        )
-    except Exception as exc:
-        logger.exception("query_simple_error", video_id=body.video_id, thread_id=thread_id)
-        raise AppError(500, "INTERNAL_ERROR", "An unexpected error occurred.") from exc
-
-    return QuestionResponse(
-        answer=result.answer,
-        sources=[
-            {
-                "chunk_id": doc.metadata.get("chunk_id"),
-                "start_ts": doc.metadata.get("start_ts"),
-                "end_ts": doc.metadata.get("end_ts"),
-                "text": doc.page_content,
-            }
-            for doc in result.sources
-        ],
-    )
 
 
 async def _handle_advanced_query(
@@ -280,11 +232,10 @@ async def query(
     chroma_client=Depends(get_chroma_client),
     ask_graph_cache: dict = Depends(get_ask_graph_cache),
 ):
-    """Unified Q&A endpoint with streaming and advanced mode support.
+    """Unified Q&A endpoint with streaming support.
 
     Flags:
     - stream: Enable Server-Sent Events streaming (default: False)
-    - advanced: Use LangGraph pipeline with guardrails (default: True)
     """
     key = _resolve_key(settings)
     emb = get_embeddings(settings, api_key=key)
@@ -296,7 +247,6 @@ async def query(
         question=body.question[:80],
         thread_id=thread_id,
         stream=body.stream,
-        advanced=body.advanced,
     )
 
     if body.stream:
@@ -304,14 +254,9 @@ async def query(
             body, settings, key, emb, thread_id, thread_store, chroma_client, ask_graph_cache
         )
 
-    if body.advanced:
-        result = await _handle_advanced_query(
-            body, settings, key, emb, thread_id, thread_store, chroma_client, ask_graph_cache
-        )
-    else:
-        result = await _handle_simple_query(
-            body, settings, key, emb, thread_id, ChromaVectorStore(chroma_client)
-        )
+    result = await _handle_advanced_query(
+        body, settings, key, emb, thread_id, thread_store, chroma_client, ask_graph_cache
+    )
 
     logger.info(
         "query_completed",

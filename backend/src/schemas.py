@@ -29,7 +29,6 @@ class QueryRequest(BaseModel):
     video_id: str = Field(..., min_length=1, description="YouTube video ID")
     question: str = Field(..., min_length=1, description="Question about the video")
     stream: bool = Field(False, description="Enable streaming response")
-    advanced: bool = Field(True, description="Use advanced graph-based pipeline")
     conversation_history: list[ConversationTurn] = Field(
         default_factory=list, description="Prior turn messages"
     )
