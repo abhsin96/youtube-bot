@@ -2,7 +2,6 @@ import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import chromadb
 import structlog
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -11,7 +10,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
-from src.retriever import build_retriever
+from src.stores.vector_store_abc import VectorStorePort
 from src.tokens import count_tokens
 
 logger = structlog.get_logger(__name__)
@@ -143,7 +142,7 @@ def answer_question(
     video_id: str,
     question: str,
     embeddings: Embeddings,
-    chroma_client: chromadb.ClientAPI,
+    vector_store: VectorStorePort,
     chat_model: str,
     openai_api_key: str,
     k: int = 5,
@@ -153,8 +152,8 @@ def answer_question(
     openai_api_base: str = "",
 ) -> RAGResult:
     """Retrieve relevant chunks then call the LLM; return answer + sources."""
-    retriever = build_retriever(
-        video_id, embeddings, chroma_client, k=k, score_threshold=score_threshold
+    retriever = vector_store.build_retriever(
+        video_id, embeddings, k=k, score_threshold=score_threshold
     )
     sources = retriever.invoke(question)
 

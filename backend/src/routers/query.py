@@ -32,6 +32,7 @@ from src.error_envelope import AppError
 from src.schemas import AskResponse, QueryRequest, QuestionResponse
 from src.stores.chroma_vector_store import ChromaVectorStore
 from src.stores.thread_store import AnyThreadStore, _resolve_history
+from src.stores.vector_store_abc import VectorStorePort
 
 logger = structlog.get_logger(__name__)
 
@@ -150,7 +151,7 @@ async def _handle_simple_query(
     key: str,
     emb,
     thread_id: str,
-    chroma_client,
+    vector_store: VectorStorePort,
 ) -> QuestionResponse:
     try:
         result = await run_in_threadpool(
@@ -158,7 +159,7 @@ async def _handle_simple_query(
             video_id=body.video_id,
             question=body.question,
             embeddings=emb,
-            chroma_client=chroma_client,
+            vector_store=vector_store,
             chat_model=settings.chat_model,
             openai_api_key=key,
             k=body.k,
@@ -308,7 +309,9 @@ async def query(
             body, settings, key, emb, thread_id, thread_store, chroma_client, ask_graph_cache
         )
     else:
-        result = await _handle_simple_query(body, settings, key, emb, thread_id, chroma_client)
+        result = await _handle_simple_query(
+            body, settings, key, emb, thread_id, ChromaVectorStore(chroma_client)
+        )
 
     logger.info(
         "query_completed",

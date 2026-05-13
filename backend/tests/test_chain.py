@@ -257,23 +257,26 @@ def test_build_rag_chain_passes_api_key():
 
 
 @pytest.fixture()
-def tmp_db(tmp_path):
-    return tmp_path / "chroma"
+def mock_vector_store():
+    """Return a MagicMock VectorStorePort whose build_retriever() returns a mock retriever."""
+    store = MagicMock()
+    retriever = MagicMock()
+    retriever.invoke.return_value = []
+    store.build_retriever.return_value = retriever
+    return store
 
 
-def test_answer_question_returns_rag_result(tmp_db):
+def test_answer_question_returns_rag_result(mock_vector_store):
     docs = [_doc("LangChain is a framework", start_ts=1.0)]
+    mock_vector_store.build_retriever.return_value = _mock_retriever(docs)
 
-    with (
-        patch("src.chain.build_retriever", return_value=_mock_retriever(docs)),
-        patch("src.chain.build_rag_chain") as mock_chain_fn,
-    ):
+    with patch("src.chain.build_rag_chain") as mock_chain_fn:
         mock_chain = MagicMock()
         mock_chain.invoke.return_value = "LangChain is great."
         mock_chain_fn.return_value = mock_chain
 
         result = answer_question(
-            _VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test"
+            _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test"
         )
 
     assert isinstance(result, RAGResult)
@@ -281,42 +284,44 @@ def test_answer_question_returns_rag_result(tmp_db):
     assert result.sources == docs
 
 
-def test_answer_question_no_sources_returns_fallback(tmp_db):
-    with patch("src.chain.build_retriever", return_value=_mock_retriever([])):
-        result = answer_question(
-            _VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test"
-        )
+def test_answer_question_no_sources_returns_fallback(mock_vector_store):
+    mock_vector_store.build_retriever.return_value = _mock_retriever([])
+    result = answer_question(
+        _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test"
+    )
     assert "isn't available" in result.answer.lower()
     assert result.sources == []
 
 
-def test_answer_question_passes_k_to_retriever(tmp_db):
-    with patch("src.chain.build_retriever", return_value=_mock_retriever([])) as mock_build:
-        answer_question(
-            _VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test", k=3
-        )
-    assert mock_build.call_args.kwargs["k"] == 3
+def test_answer_question_passes_k_to_retriever(mock_vector_store):
+    mock_vector_store.build_retriever.return_value = _mock_retriever([])
+    answer_question(
+        _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test", k=3
+    )
+    assert mock_vector_store.build_retriever.call_args.kwargs["k"] == 3
 
 
-def test_answer_question_passes_question_to_retriever(tmp_db):
+def test_answer_question_passes_question_to_retriever(mock_vector_store):
     retriever = _mock_retriever([])
-    with patch("src.chain.build_retriever", return_value=retriever):
-        answer_question(_VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test")
+    mock_vector_store.build_retriever.return_value = retriever
+    answer_question(
+        _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test"
+    )
     retriever.invoke.assert_called_once_with(_QUESTION)
 
 
-def test_answer_question_context_passed_to_chain(tmp_db):
+def test_answer_question_context_passed_to_chain(mock_vector_store):
     docs = [_doc("unique phrase xyz", start_ts=7.0)]
+    mock_vector_store.build_retriever.return_value = _mock_retriever(docs)
 
-    with (
-        patch("src.chain.build_retriever", return_value=_mock_retriever(docs)),
-        patch("src.chain.build_rag_chain") as mock_chain_fn,
-    ):
+    with patch("src.chain.build_rag_chain") as mock_chain_fn:
         mock_chain = MagicMock()
         mock_chain.invoke.return_value = "ok"
         mock_chain_fn.return_value = mock_chain
 
-        answer_question(_VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test")
+        answer_question(
+            _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test"
+        )
 
     invoke_kwargs = mock_chain.invoke.call_args[0][0]
     assert "unique phrase xyz" in invoke_kwargs["context"]
@@ -326,29 +331,27 @@ def test_answer_question_context_passed_to_chain(tmp_db):
 # --- history threading ---
 
 
-def test_answer_question_passes_empty_history_by_default(tmp_db):
-    with (
-        patch("src.chain.build_retriever", return_value=_mock_retriever([])),
-        patch("src.chain.build_rag_chain") as mock_chain_fn,
-    ):
+def test_answer_question_passes_empty_history_by_default(mock_vector_store):
+    mock_vector_store.build_retriever.return_value = _mock_retriever([])
+    with patch("src.chain.build_rag_chain") as mock_chain_fn:
         mock_chain = MagicMock()
         mock_chain.invoke.return_value = (
             "I'm sorry, that information isn't available in the video transcript."
         )
         mock_chain_fn.return_value = mock_chain
-        answer_question(_VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test")
+        answer_question(
+            _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test"
+        )
     # no sources → chain never called; but if sources existed, history would be []
     # We verify the no-sources branch doesn't crash with missing history arg.
 
 
-def test_answer_question_passes_history_to_chain(tmp_db):
+def test_answer_question_passes_history_to_chain(mock_vector_store):
     docs = [_doc("content", start_ts=5.0)]
     history = [HumanMessage(content="prev"), AIMessage(content="ans")]
+    mock_vector_store.build_retriever.return_value = _mock_retriever(docs)
 
-    with (
-        patch("src.chain.build_retriever", return_value=_mock_retriever(docs)),
-        patch("src.chain.build_rag_chain") as mock_chain_fn,
-    ):
+    with patch("src.chain.build_rag_chain") as mock_chain_fn:
         mock_chain = MagicMock()
         mock_chain.invoke.return_value = "answer"
         mock_chain_fn.return_value = mock_chain
@@ -356,7 +359,7 @@ def test_answer_question_passes_history_to_chain(tmp_db):
             _VIDEO_ID,
             _QUESTION,
             _fake_embeddings(),
-            tmp_db,
+            mock_vector_store,
             "gpt-4o-mini",
             "sk-test",
             history=history,
@@ -366,13 +369,11 @@ def test_answer_question_passes_history_to_chain(tmp_db):
     assert invoke_kwargs["history"] == history
 
 
-def test_answer_question_none_history_becomes_empty_list(tmp_db):
+def test_answer_question_none_history_becomes_empty_list(mock_vector_store):
     docs = [_doc("content", start_ts=5.0)]
+    mock_vector_store.build_retriever.return_value = _mock_retriever(docs)
 
-    with (
-        patch("src.chain.build_retriever", return_value=_mock_retriever(docs)),
-        patch("src.chain.build_rag_chain") as mock_chain_fn,
-    ):
+    with patch("src.chain.build_rag_chain") as mock_chain_fn:
         mock_chain = MagicMock()
         mock_chain.invoke.return_value = "answer"
         mock_chain_fn.return_value = mock_chain
@@ -380,7 +381,7 @@ def test_answer_question_none_history_becomes_empty_list(tmp_db):
             _VIDEO_ID,
             _QUESTION,
             _fake_embeddings(),
-            tmp_db,
+            mock_vector_store,
             "gpt-4o-mini",
             "sk-test",
             history=None,
@@ -393,37 +394,37 @@ def test_answer_question_none_history_becomes_empty_list(tmp_db):
 # --- score_threshold ---
 
 
-def test_answer_question_default_score_threshold_zero(tmp_db):
-    with patch("src.chain.build_retriever", return_value=_mock_retriever([])) as mock_build:
-        answer_question(_VIDEO_ID, _QUESTION, _fake_embeddings(), tmp_db, "gpt-4o-mini", "sk-test")
-    assert mock_build.call_args.kwargs["score_threshold"] == 0.0
+def test_answer_question_default_score_threshold_zero(mock_vector_store):
+    mock_vector_store.build_retriever.return_value = _mock_retriever([])
+    answer_question(
+        _VIDEO_ID, _QUESTION, _fake_embeddings(), mock_vector_store, "gpt-4o-mini", "sk-test"
+    )
+    assert mock_vector_store.build_retriever.call_args.kwargs["score_threshold"] == 0.0
 
 
-def test_answer_question_passes_score_threshold_to_retriever(tmp_db):
-    with patch("src.chain.build_retriever", return_value=_mock_retriever([])) as mock_build:
-        answer_question(
-            _VIDEO_ID,
-            _QUESTION,
-            _fake_embeddings(),
-            tmp_db,
-            "gpt-4o-mini",
-            "sk-test",
-            score_threshold=0.25,
-        )
-    assert mock_build.call_args.kwargs["score_threshold"] == 0.25
+def test_answer_question_passes_score_threshold_to_retriever(mock_vector_store):
+    mock_vector_store.build_retriever.return_value = _mock_retriever([])
+    answer_question(
+        _VIDEO_ID,
+        _QUESTION,
+        _fake_embeddings(),
+        mock_vector_store,
+        "gpt-4o-mini",
+        "sk-test",
+        score_threshold=0.25,
+    )
+    assert mock_vector_store.build_retriever.call_args.kwargs["score_threshold"] == 0.25
 
 
-def test_answer_question_threshold_filters_propagate(tmp_db):
+def test_answer_question_threshold_filters_propagate(mock_vector_store):
     """Docs that don't meet the threshold come back empty from the retriever."""
-    with (
-        patch("src.chain.build_retriever", return_value=_mock_retriever([])),
-        patch("src.chain.build_rag_chain"),
-    ):
+    mock_vector_store.build_retriever.return_value = _mock_retriever([])
+    with patch("src.chain.build_rag_chain"):
         result = answer_question(
             _VIDEO_ID,
             _QUESTION,
             _fake_embeddings(),
-            tmp_db,
+            mock_vector_store,
             "gpt-4o-mini",
             "sk-test",
             score_threshold=0.9,
