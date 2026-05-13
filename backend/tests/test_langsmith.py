@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 def test_no_network_call_when_tracing_disabled(monkeypatch):
     """Verify that LangSmith tracing is disabled when env vars are false.
-    
+
     Since build_rag_chain was removed with the simple query path, this test
     now verifies that importing chain helpers doesn't trigger network calls.
     """
